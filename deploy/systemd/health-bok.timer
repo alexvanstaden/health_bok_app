@@ -1,0 +1,13 @@
+# Fires the daily Digest pipeline at 06:00 local time. Persistent=true catches a
+# missed run (e.g. the VPS was off at 06:00) on the next boot, so a downtime
+# never silently skips a day's Digest.
+
+[Unit]
+Description=Run the Health & Longevity Digest daily at 06:00
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

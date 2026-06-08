@@ -1,0 +1,22 @@
+# systemd alternative to cron for the daily Digest pipeline. Paired with
+# health-bok.timer, which triggers it at 06:00. A oneshot unit: it runs the job
+# once and exits; the timer owns the schedule.
+#
+# Install (as root):
+#   cp deploy/systemd/health-bok.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now health-bok.timer
+#
+# Adjust WorkingDirectory / EnvironmentFile / ExecStart paths and User to match
+# the deploy. EnvironmentFile supplies DATABASE_URL and the API keys.
+
+[Unit]
+Description=Health & Longevity daily Digest pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=health-bok
+WorkingDirectory=/opt/health_bok_app
+EnvironmentFile=/opt/health_bok_app/.env
+ExecStart=/opt/health_bok_app/.venv/bin/health-bok run

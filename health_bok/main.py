@@ -3,7 +3,8 @@
 Two responsibilities sit behind this CLI:
 
   * ``health-bok run`` (the default) wires the real adapters to the orchestrator
-    and runs the daily pipeline for the configured video.
+    and runs the daily pipeline: for every watched Creator it detects new uploads
+    via RSS, summarizes them, and sends one Digest.
   * ``health-bok creators add|remove|list`` maintains the watch list of
     Creators, resolving an @handle/URL to a stable channel_id once at add-time.
 
@@ -69,7 +70,6 @@ def _cmd_run(_args: argparse.Namespace) -> int:
         init_schema(conn)
         repo = Repository(conn)
         result = run_job(
-            cfg.video_id,
             content_source=YouTubeContentSource(),
             summarizer=ClaudeSummarizer(cfg.anthropic_api_key, cfg.claude_model),
             digest_sender=ResendDigestSender(
@@ -82,11 +82,14 @@ def _cmd_run(_args: argparse.Namespace) -> int:
         conn.close()
 
     logger.info(
-        "run complete: newly_processed=%s digest_sent=%s items=%s",
+        "run complete: newly_processed=%s digest_sent=%s items=%s failures=%s",
         result.newly_processed,
         result.digest_sent,
         result.digest_item_count,
+        len(result.failures),
     )
+    for failure in result.failures:
+        logger.warning("isolated failure: %s -> %s", failure.scope, failure.error)
     return 0
 
 

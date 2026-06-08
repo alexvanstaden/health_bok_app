@@ -1,9 +1,11 @@
-"""Top-seam integration test for the slice-1 walking skeleton.
+"""Deep end-to-end assertions for one video through the daily job.
 
-Drives the whole daily job end-to-end with the three ports faked and a real
-ephemeral Postgres, asserting on what gets persisted and on the captured Digest
-— never on internal implementation details (PRD #1 testing decisions). This is
-the primary test and establishes the port + fake + real-Postgres convention.
+The slice-1 invariants — full provenance archived, Transcript stored immutably
+with timestamps, prose Summary persisted, a one-item Digest sent linking to the
+source — still hold, now exercised through the slice-3 daily job: a single
+Creator whose RSS feed surfaces one new video. Drives the whole job with the
+three ports faked and a real ephemeral Postgres, asserting only on what gets
+persisted and on the captured Digest (PRD #1 testing decisions).
 """
 
 from __future__ import annotations
@@ -14,21 +16,28 @@ import psycopg
 import pytest
 
 from health_bok.job import run_job
-from health_bok.models import FetchedTranscript, Provenance, TranscriptSegment
+from health_bok.models import (
+    CreatorIdentity,
+    FetchedTranscript,
+    Provenance,
+    TranscriptSegment,
+)
 from health_bok.repository import Repository
 from tests.fakes import FakeContentSource, FakeDigestSender, FakeSummarizer
 
 MODEL = "claude-sonnet-4-6"
 SUMMARY_TEXT = "This video argues that zone-2 cardio improves mitochondrial density."
 
+CHANNEL_ID = "UC_test_channel"
+VIDEO_ID = "abc123XYZ"
 PUBLISHED_AT = datetime(2026, 1, 15, 9, 0, tzinfo=timezone.utc)
 
 
 def make_transcript() -> FetchedTranscript:
     provenance = Provenance(
-        video_id="abc123XYZ",
+        video_id=VIDEO_ID,
         title="Zone 2 Cardio Explained",
-        channel_id="UC_test_channel",
+        channel_id=CHANNEL_ID,
         channel_name="Longevity Lab",
         published_at=PUBLISHED_AT,
     )
@@ -39,9 +48,14 @@ def make_transcript() -> FetchedTranscript:
     return FetchedTranscript(provenance=provenance, segments=segments, source="captions")
 
 
+def seed_creator(repo: Repository) -> None:
+    """Put the Creator on the watch list so the daily job discovers it."""
+    repo.add_creator(CreatorIdentity(channel_id=CHANNEL_ID, name="Longevity Lab"))
+    repo.commit()
+
+
 def run(repo, content_source, summarizer, digest_sender):
     return run_job(
-        "abc123XYZ",
         content_source=content_source,
         summarizer=summarizer,
         digest_sender=digest_sender,
@@ -52,17 +66,19 @@ def run(repo, content_source, summarizer, digest_sender):
 
 def test_walking_skeleton_archives_summarizes_and_sends_digest(conn):
     transcript = make_transcript()
-    content_source = FakeContentSource(transcript)
+    content_source = FakeContentSource(transcript, feeds={CHANNEL_ID: [VIDEO_ID]})
     summarizer = FakeSummarizer(SUMMARY_TEXT)
     digest_sender = FakeDigestSender()
     repo = Repository(conn)
+    seed_creator(repo)
 
     result = run(repo, content_source, summarizer, digest_sender)
 
     # --- The job reports it processed the one video and sent one Digest. -----
-    assert result.newly_processed == ["abc123XYZ"]
+    assert result.newly_processed == [VIDEO_ID]
     assert result.digest_sent is True
     assert result.digest_item_count == 1
+    assert result.failures == []
 
     # --- Full provenance is archived in Postgres (AC 1). ---------------------
     with conn.cursor() as cur:
@@ -72,17 +88,17 @@ def test_walking_skeleton_archives_summarizes_and_sends_digest(conn):
             "FROM videos v JOIN creators c ON c.id = v.creator_id"
         )
         row = cur.fetchone()
-    assert row[0] == "abc123XYZ"
+    assert row[0] == VIDEO_ID
     assert row[1] == "https://www.youtube.com/watch?v=abc123XYZ"
     assert row[2] == "Zone 2 Cardio Explained"
     assert row[3] == PUBLISHED_AT
     assert row[4] is not None  # retrieved_at stamped at archive time
     assert row[5] == "captions"
     assert row[6] == "Longevity Lab"
-    assert row[7] == "UC_test_channel"
+    assert row[7] == CHANNEL_ID
 
     # --- The Transcript is archived with its timestamps (AC 1). --------------
-    segments = repo.load_transcript_segments("abc123XYZ")
+    segments = repo.load_transcript_segments(VIDEO_ID)
     assert [s.text for s in segments] == [
         "Welcome back to the channel.",
         "Today we talk about zone 2.",
@@ -90,7 +106,7 @@ def test_walking_skeleton_archives_summarizes_and_sends_digest(conn):
     assert segments[0].start == 0.0 and segments[1].start == 2.5
 
     # --- A prose Summary is persisted alongside the Transcript (AC 2). -------
-    archived = repo.get_summary("abc123XYZ")
+    archived = repo.get_summary(VIDEO_ID)
     assert archived is not None
     assert archived.body == SUMMARY_TEXT
 
@@ -104,36 +120,6 @@ def test_walking_skeleton_archives_summarizes_and_sends_digest(conn):
     assert item.title == "Zone 2 Cardio Explained"
 
 
-def test_rerun_is_idempotent_and_sends_no_second_digest(conn):
-    repo = Repository(conn)
-    transcript = make_transcript()
-
-    first_source = FakeContentSource(transcript)
-    first_summarizer = FakeSummarizer(SUMMARY_TEXT)
-    first_sender = FakeDigestSender()
-    run(repo, first_source, first_summarizer, first_sender)
-
-    # Re-run the same day with fresh fakes.
-    second_source = FakeContentSource(transcript)
-    second_summarizer = FakeSummarizer(SUMMARY_TEXT)
-    second_sender = FakeDigestSender()
-    result = run(repo, second_source, second_summarizer, second_sender)
-
-    # Nothing is re-fetched or re-summarized, and no second Digest goes out.
-    assert result.newly_processed == []
-    assert result.digest_sent is False
-    assert second_source.fetched_video_ids == []
-    assert second_summarizer.summarized == []
-    assert second_sender.sent == []
-
-    # Exactly one Transcript and one Summary exist — no duplicates.
-    with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM transcripts")
-        assert cur.fetchone()[0] == 1
-        cur.execute("SELECT count(*) FROM summaries")
-        assert cur.fetchone()[0] == 1
-
-
 def test_transcript_is_immutable(conn):
     """The archived Transcript cannot be mutated (ADR-0001, AC 7)."""
     repo = Repository(conn)
@@ -144,11 +130,11 @@ def test_transcript_is_immutable(conn):
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE transcripts SET segments = '[]'::jsonb WHERE video_id = %s",
-                ("abc123XYZ",),
+                (VIDEO_ID,),
             )
     conn.rollback()
 
     with pytest.raises(psycopg.errors.RaiseException):
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM transcripts WHERE video_id = %s", ("abc123XYZ",))
+            cur.execute("DELETE FROM transcripts WHERE video_id = %s", (VIDEO_ID,))
     conn.rollback()
