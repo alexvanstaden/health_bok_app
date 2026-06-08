@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "health-bok"
+version = "0.1.0"
+description = "Health & Longevity content pipeline — daily YouTube Transcript → Summary → Digest (Part 1)."
+requires-python = ">=3.10"
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "anthropic>=0.40",
+    "resend>=2.0",
+    "youtube-transcript-api>=0.6",
+    "yt-dlp>=2024.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "testcontainers[postgres]>=4.0",
+]
+
+[project.scripts]
+health-bok = "health_bok.main:main"
+
+[tool.setuptools.packages.find]
+include = ["health_bok*"]
+
+[tool.setuptools.package-data]
+health_bok = ["*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
