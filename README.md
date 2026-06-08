@@ -5,19 +5,26 @@ summarizes their material, and (later) links it into a personalized knowledge gr
 See [`CONTEXT.md`](CONTEXT.md) for the domain language and [`docs/adr/`](docs/adr/)
 for the architectural decisions.
 
-## Status: Slice 1 — walking skeleton
+## Status
 
-The thinnest end-to-end path through every layer is in place (issue #2). For one
-known video the pipeline:
+**Slice 1 — walking skeleton (issue #2).** The thinnest end-to-end path through
+every layer. For one known video the pipeline:
 
 1. fetches the video's YouTube captions as its **Transcript** (with timestamps),
 2. archives that Transcript **immutably** in Postgres with full provenance,
 3. generates a prose **Summary** via the Claude API, and
 4. sends a one-item **Digest** email (linking to the source video) via Resend.
 
-Everything else — RSS discovery, the Whisper fallback, map-reduce summarization
-of long videos, backfill Candidates, and all of Part 2 (the knowledge graph) —
-is deferred to later slices.
+**Slice 2 — Creator management (issue #3).** The owner maintains a watch list of
+**Creators**. A Creator is added by @handle or channel URL; the reference is
+resolved to its underlying YouTube `channel_id` **exactly once** at add-time and
+stored with the Creator's name as a stable identity. Re-adding the same Creator
+(even via a different handle/URL that resolves to the same channel) never
+duplicates it. The daily job reads this list. See [Manage Creators](#manage-creators).
+
+Everything else — RSS discovery against the watch list, the Whisper fallback,
+map-reduce summarization of long videos, backfill Candidates, and all of Part 2
+(the knowledge graph) — is deferred to later slices.
 
 ## Architecture
 
@@ -30,20 +37,21 @@ fakes while Postgres stays real:
 
 | Port            | Real adapter (`health_bok/adapters/`) | Service             |
 | --------------- | ------------------------------------- | ------------------- |
-| `ContentSource` | `youtube.py`                          | YouTube (yt-dlp + captions) |
+| `ContentSource` | `youtube.py`                          | YouTube (yt-dlp + captions); also resolves an @handle/URL to a `channel_id` |
 | `Summarizer`    | `claude.py`                           | Claude API          |
 | `DigestSender`  | `resend.py`                           | Resend              |
 
 ```
 health_bok/
 ├── config.py        env-var configuration (no secrets in code)
-├── models.py        domain types (Transcript, Provenance, Summary, Digest)
+├── models.py        domain types (CreatorIdentity, Transcript, Provenance, Summary, Digest)
 ├── ports.py         the three port protocols
 ├── db.py            Postgres connection + schema bootstrap
 ├── schema.sql       creators / videos / transcripts / summaries / processing_state
-├── repository.py    persistence (archive, summarize, mark processed/sent)
+├── repository.py    persistence (creators, archive, summarize, mark processed/sent)
+├── creators.py      Creator-management service (add / remove the watch list)
 ├── job.py           the orchestrator (run_job)
-├── main.py          entrypoint wiring the real adapters
+├── main.py          CLI: `run` (daily job) + `creators add|remove|list`
 └── adapters/        youtube · claude · resend
 ```
 
@@ -74,13 +82,32 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 
 ```bash
 source .venv/bin/activate
-health-bok            # or: python -m health_bok
+health-bok            # or: health-bok run, or: python -m health_bok
 ```
 
 This applies the schema if needed, then runs the job for `WALKING_SKELETON_VIDEO_ID`.
 It is **idempotent**: re-running reprocesses nothing already archived+summarized
 and sends no second email. A failed Digest send can be retried without
 re-summarizing.
+
+## Manage Creators
+
+Maintain the watch list of Creators the system follows. These commands need only
+`DATABASE_URL` — not the Digest or Summarizer secrets.
+
+```bash
+health-bok creators add @hubermanlab                          # by @handle
+health-bok creators add https://www.youtube.com/@PeterAttiaMD # or by channel URL
+health-bok creators list                                      # channel_id <TAB> name
+health-bok creators remove UC2D2CMWXMOVWx7giW1n3LIg           # by channel_id (from list)
+```
+
+On `add`, the @handle/URL is resolved to its YouTube `channel_id` **once** and
+stored with the Creator's name; the daily job thereafter keys off that stable
+`channel_id` and never re-resolves. Adding the same Creator again — even via a
+different handle or URL — refreshes the name but creates no duplicate. Removal is
+by `channel_id` (shown by `list`), so it stays reliable even if a channel later
+changes its handle.
 
 ## Tests
 

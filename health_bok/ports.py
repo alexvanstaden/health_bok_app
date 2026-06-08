@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .models import Digest, FetchedTranscript
+from .models import CreatorIdentity, Digest, FetchedTranscript
 
 
 @runtime_checkable
@@ -21,6 +21,15 @@ class ContentSource(Protocol):
     single-video fetch; discovery (RSS) and backfill Candidate listing are added
     behind this same port in later slices.
     """
+
+    def resolve_creator(self, reference: str) -> CreatorIdentity:
+        """Resolve an @handle or channel URL to a Creator's stable identity.
+
+        Called once when a Creator is added (PRD #1, user story 2); the watch list
+        then stores the returned `channel_id` and the daily job never re-resolves.
+        Raises CreatorResolutionError if the reference names no reachable channel.
+        """
+        ...
 
     def fetch_transcript(self, video_id: str) -> FetchedTranscript:
         """Fetch the video's Transcript (with timestamps) and full provenance."""
