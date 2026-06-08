@@ -109,6 +109,29 @@ class FetchedAudio:
 
 
 @dataclass(frozen=True)
+class CandidateMetadata:
+    """A back-catalogue video known only by metadata — a *backfill Candidate*.
+
+    Listed from a Creator's back-catalogue when the Creator is added (issue #7)
+    and stored without a Transcript or Summary: a backfill Candidate in the sense
+    of CONTEXT.md, known only by title, description, publish date, and URL until
+    the owner approves it into the Body of Knowledge (ADR-0004). There is no
+    `source` field on purpose — acquiring raw content (captions/Whisper) is
+    exactly what backfill does *not* do (PRD #1, user story 29).
+    """
+
+    video_id: str
+    title: str
+    description: str
+    published_at: datetime
+
+    @property
+    def url(self) -> str:
+        """Canonical watch URL — the Candidate's citable link (CONTEXT.md)."""
+        return f"{YOUTUBE_WATCH}{self.video_id}"
+
+
+@dataclass(frozen=True)
 class DigestItem:
     """One video's entry in the Digest: its Summary and a link to the source."""
 

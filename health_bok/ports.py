@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .models import CreatorIdentity, Digest, FetchedAudio, FetchedTranscript, TranscriptSegment
+from .models import (
+    CandidateMetadata,
+    CreatorIdentity,
+    Digest,
+    FetchedAudio,
+    FetchedTranscript,
+    TranscriptSegment,
+)
 
 
 @runtime_checkable
@@ -39,6 +46,20 @@ class ContentSource(Protocol):
         which is all a daily run needs; full back-catalogue listing is a separate,
         later concern. Raises on a feed it cannot reach, so the job can isolate a
         single Creator's failure without aborting the run.
+        """
+        ...
+
+    def list_backcatalogue(self, channel_id: str) -> list[CandidateMetadata]:
+        """List the Creator's whole back-catalogue as metadata-only Candidates.
+
+        Called once when a Creator is added (issue #7) to seed *backfill*
+        Candidates. Each past upload is returned as metadata only — title,
+        description, publish date, URL — with **no** Transcript fetched and
+        Whisper never called (ADR-0004; user story 29). The recency cutoff is
+        applied by the caller, not here, so this stays a dumb full lister; that
+        is also what lets a test assert the cutoff against a fake that returns
+        the whole catalogue. Distinct from `discover_videos`, which surfaces only
+        the latest handful for the daily diff.
         """
         ...
 

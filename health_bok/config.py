@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 
 # Default summarization model: cost-effective bulk summarization, overridable to
 # a higher-quality model via CLAUDE_MODEL (PRD #1, user story 17).
@@ -21,6 +22,11 @@ DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 DEFAULT_SUMMARY_MAX_CHARS = 48_000
 # Target size of each section when a long Transcript is chunked for map-reduce.
 DEFAULT_SUMMARY_CHUNK_CHARS = 16_000
+
+# How far back to seed a Creator's back-catalogue as Candidates when it is added
+# (issue #7): ~2 years. Older uploads are skipped so the approval queue isn't
+# flooded with a creator's ancient catalogue. Tunable via BACKFILL_CUTOFF_DAYS.
+DEFAULT_BACKFILL_CUTOFF_DAYS = 730
 
 
 class ConfigError(RuntimeError):
@@ -63,6 +69,19 @@ def database_url() -> str:
     present.
     """
     return _require("DATABASE_URL")
+
+
+def backfill_cutoff() -> timedelta:
+    """The backfill recency window applied when a Creator is added (issue #7).
+
+    Optional and defaulted like the summarization knobs, so adding a Creator
+    still needs only DATABASE_URL. Tunable via BACKFILL_CUTOFF_DAYS (a positive
+    count of days); a bad value fails loudly at startup rather than silently
+    backfilling the wrong window.
+    """
+    return timedelta(
+        days=_positive_int("BACKFILL_CUTOFF_DAYS", DEFAULT_BACKFILL_CUTOFF_DAYS)
+    )
 
 
 @dataclass(frozen=True)

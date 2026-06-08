@@ -49,8 +49,19 @@ section Summaries are reduced — through the same Summarizer — into one final
 **Summary**. Map-reduce is transparent to the job: the final Summary is persisted
 and digested like any other, so a multi-hour podcast never breaks the pipeline.
 
-Everything else — backfill Candidates and all of Part 2 (the knowledge graph) —
-is deferred to later slices.
+**Slice 6 — backfill Candidate population (issue #7).** Adding a Creator now also
+seeds its back-catalogue. The Creator's past uploads are listed (via `yt-dlp`'s
+flat playlist) and each one published within a configurable recency window
+(`BACKFILL_CUTOFF_DAYS`, default ~2 years) is stored as a **Candidate** — *metadata
+only*: title, description, publish date, and URL. No Transcript is fetched, no
+Summary is generated, and **Whisper is never called** for backfill. A backfill
+Candidate stays metadata-only until the owner approves it into the Body of
+Knowledge (ADR-0004); listing is idempotent, so re-adding a Creator only tops up
+newly-published Candidates. Reviewing and approving Candidates — and the
+processing that approval triggers — is Part 2, deferred to later slices.
+
+Everything else — Candidate approval and all of Part 2 (the knowledge graph) — is
+deferred to later slices.
 
 ## Architecture
 
@@ -63,7 +74,7 @@ fakes while Postgres stays real:
 
 | Port            | Real adapter (`health_bok/adapters/`) | Service             |
 | --------------- | ------------------------------------- | ------------------- |
-| `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
+| `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, lists the back-catalogue for backfill Candidates, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
 | `Transcriber`   | `whisper.py`                          | OpenAI Whisper — transcribes a caption-less video's audio (daily path only) |
 | `Summarizer`    | `claude.py` (single pass), wrapped by `summarizer.py` (map-reduce for long Transcripts) | Claude API          |
 | `DigestSender`  | `resend.py`                           | Resend              |
@@ -74,9 +85,10 @@ health_bok/
 ├── models.py        domain types (CreatorIdentity, Transcript, Provenance, Summary, Digest)
 ├── ports.py         the four port protocols
 ├── db.py            Postgres connection + schema bootstrap
-├── schema.sql       creators / videos / transcripts / summaries / processing_state
-├── repository.py    persistence (creators, archive, summarize, mark processed/sent)
+├── schema.sql       creators / candidates / videos / transcripts / summaries / processing_state
+├── repository.py    persistence (creators, candidates, archive, summarize, mark processed/sent)
 ├── creators.py      Creator-management service (add / remove the watch list)
+├── backfill.py      backfill Candidate population: list back-catalogue → metadata-only Candidates
 ├── summarizer.py    MapReduceSummarizer: chunk + reduce long Transcripts
 ├── job.py           the orchestrator (run_job): RSS detect → spine → one Digest
 ├── main.py          CLI: `run` (daily job) + `creators add|remove|list`
@@ -104,6 +116,7 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `CLAUDE_MODEL`             | Summarization model (default `claude-sonnet-4-6`)  |
 | `SUMMARY_MAX_CHARS`        | Map-reduce above this Transcript length (default `48000`) |
 | `SUMMARY_CHUNK_CHARS`      | Section size when map-reducing (default `16000`)   |
+| `BACKFILL_CUTOFF_DAYS`     | Backfill window when a Creator is added (default `730`, ~2 years) |
 | `RESEND_API_KEY`           | Resend — the DigestSender                          |
 | `DIGEST_FROM`              | Verified Resend "from" address                      |
 | `DIGEST_RECIPIENT`         | Where the Digest is delivered                       |
@@ -154,6 +167,13 @@ different handle or URL — refreshes the name but creates no duplicate. Removal
 by `channel_id` (shown by `list`), so it stays reliable even if a channel later
 changes its handle.
 
+Adding a Creator also **backfills** its recent back-catalogue as metadata-only
+**Candidates** (issue #7): every past upload published within `BACKFILL_CUTOFF_DAYS`
+(default ~2 years) is recorded by title, description, publish date, and URL — with
+no Transcript fetched and Whisper never called. These Candidates await the owner's
+approval into the Body of Knowledge (a later slice); re-adding a Creator only tops
+up newly-published ones.
+
 ## Schedule the daily job
 
 The job is meant to run unattended each morning (~6am). Two ready-to-edit units
@@ -185,7 +205,9 @@ persisted records and the captured Digest. `test_daily_job.py` covers detection
 across Creators, idempotent re-run, the empty day, per-Creator failure isolation,
 and the retriable failed send; `test_transcript_fallback.py` covers the
 captions-vs-Whisper decision (captions used when present, Whisper when absent,
-and the source recorded either way). They need Docker running.
+and the source recorded either way); `test_backfill.py` covers backfill Candidate
+population (metadata-only Candidates, the recency cutoff honored, idempotent
+re-runs, and that no transcription happens). They need Docker running.
 `test_map_reduce_summarizer.py` is a pure unit test of the chunk/reduce path
 (faked Summarizer, no Postgres) and needs no Docker.
 

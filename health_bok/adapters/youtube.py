@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 from ..models import (
+    CandidateMetadata,
     CreatorIdentity,
     CreatorResolutionError,
     FetchedAudio,
@@ -82,6 +83,41 @@ class YouTubeContentSource:
             for element in root.iterfind("atom:entry/yt:videoId", _FEED_NS)
             if element.text
         ]
+
+    def list_backcatalogue(self, channel_id: str) -> list[CandidateMetadata]:
+        # Backfill listing (issue #7): enumerate the channel's uploads with
+        # extract_flat so the whole back-catalogue is listed in one cheap pass —
+        # no per-video extraction, no captions, no audio (user story 29). The
+        # caller applies the recency cutoff. Flat entries carry ids + titles;
+        # an exact publish date and description aren't always part of the flat
+        # record, so they're filled best-effort — the owner curates by title in
+        # the approval queue regardless.
+        from yt_dlp import YoutubeDL
+
+        url = f"{YOUTUBE_BASE}/channel/{channel_id}/videos"
+        opts = {
+            "quiet": True,
+            "skip_download": True,
+            "no_warnings": True,
+            "extract_flat": True,
+        }
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        candidates: list[CandidateMetadata] = []
+        for entry in info.get("entries") or []:
+            video_id = entry.get("id")
+            if not video_id:
+                continue
+            candidates.append(
+                CandidateMetadata(
+                    video_id=video_id,
+                    title=entry.get("title") or "",
+                    description=entry.get("description") or "",
+                    published_at=_entry_published_at(entry),
+                )
+            )
+        return candidates
 
     def fetch_transcript(self, video_id: str) -> FetchedTranscript | None:
         # Captions are checked first: a caption-less video returns None without
@@ -183,3 +219,17 @@ def _parse_upload_date(upload_date: str | None) -> datetime:
     if not upload_date:
         return datetime.now(timezone.utc)
     return datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+
+
+def _entry_published_at(entry: dict) -> datetime:
+    """Best-effort publish date for a flat back-catalogue entry (issue #7).
+
+    A flat entry may carry a `timestamp` (epoch seconds) or an `upload_date`;
+    when it carries neither, fall back to now so an undated entry is
+    conservatively kept by the recency cutoff — the owner still curates it at
+    approval, so over-inclusion is the safe failure here.
+    """
+    timestamp = entry.get("timestamp")
+    if timestamp is not None:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    return _parse_upload_date(entry.get("upload_date"))
