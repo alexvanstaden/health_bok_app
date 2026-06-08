@@ -63,8 +63,8 @@ class Config:
             database_url=_require("DATABASE_URL"),
             anthropic_api_key=_require("ANTHROPIC_API_KEY"),
             resend_api_key=_require("RESEND_API_KEY"),
-            # Read now even though Whisper fallback lands in a later slice, so the
-            # deploy surface for the three keys is established here (issue #2 AC).
+            # Powers the Whisper transcription fallback for caption-less videos
+            # (PRD #1, user story 10).
             openai_api_key=_require("OPENAI_API_KEY"),
             claude_model=os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
             digest_from=_require("DIGEST_FROM"),

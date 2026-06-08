@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .models import CreatorIdentity, Digest, FetchedTranscript
+from .models import CreatorIdentity, Digest, FetchedAudio, FetchedTranscript, TranscriptSegment
 
 
 @runtime_checkable
@@ -42,8 +42,40 @@ class ContentSource(Protocol):
         """
         ...
 
-    def fetch_transcript(self, video_id: str) -> FetchedTranscript:
-        """Fetch the video's Transcript (with timestamps) and full provenance."""
+    def fetch_transcript(self, video_id: str) -> FetchedTranscript | None:
+        """Fetch the video's caption Transcript (with timestamps) and provenance.
+
+        Returns ``None`` when the video has no captions, so the daily job can fall
+        back to Whisper (PRD #1, user stories 9-10): free captions are preferred,
+        and only their genuine absence triggers the paid audio path. A `None` here
+        is "no captions", not "fetch failed" — a real failure still raises, so it
+        is isolated like any other per-video error rather than silently downgraded.
+        """
+        ...
+
+    def fetch_audio(self, video_id: str) -> FetchedAudio:
+        """Download a caption-less video's audio (+ provenance) for Whisper.
+
+        Called only on the daily path, and only after `fetch_transcript` returned
+        ``None`` — backfill never fetches audio (user story 29). Supplies the
+        provenance the absent-caption path otherwise lacks, so the Transcript the
+        Whisper transcription produces stays fully attributable.
+        """
+        ...
+
+
+@runtime_checkable
+class Transcriber(Protocol):
+    """Transcribes a caption-less video's audio into segments (Whisper, daily only).
+
+    The one external boundary added by slice 4 (the OpenAI Whisper API). Kept
+    behind its own seam — separate from the YouTube `ContentSource` that downloads
+    the audio — so the captions-vs-Whisper fallback decision can be driven in
+    tests with fakes, and so no third-party SDK leaks into the orchestrator.
+    """
+
+    def transcribe(self, audio: FetchedAudio) -> list[TranscriptSegment]:
+        """Transcribe `audio.data` into timestamped segments."""
         ...
 
 
