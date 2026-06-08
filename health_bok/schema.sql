@@ -12,6 +12,22 @@ CREATE TABLE IF NOT EXISTS creators (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A backfill Candidate: a back-catalogue video known only by metadata, awaiting
+-- the owner's approval into the Body of Knowledge (CONTEXT.md, ADR-0004). Seeded
+-- when a Creator is added (issue #7). Deliberately holds no Transcript or Summary
+-- and has no FK to `videos` — backfill never transcribes (user story 29); raw
+-- content is acquired only if and when the Candidate is approved (a later slice).
+CREATE TABLE IF NOT EXISTS candidates (
+    id           BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    video_id     TEXT        NOT NULL UNIQUE,            -- YouTube's own id
+    creator_id   BIGINT      NOT NULL REFERENCES creators (id),
+    url          TEXT        NOT NULL,
+    title        TEXT        NOT NULL,
+    description  TEXT        NOT NULL,
+    published_at TIMESTAMPTZ NOT NULL,                   -- publish date
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- A video Source and its full provenance (PRD #1, user story 13).
 CREATE TABLE IF NOT EXISTS videos (
     video_id          TEXT        PRIMARY KEY,            -- YouTube's own id

@@ -105,7 +105,12 @@ def _cmd_creator_add(args: argparse.Namespace) -> int:
     with _creators_repo() as repo:
         try:
             identity = creators.add_creator(
-                args.reference, content_source=YouTubeContentSource(), repo=repo
+                args.reference,
+                content_source=YouTubeContentSource(),
+                repo=repo,
+                # Seed the recent back-catalogue as metadata-only Candidates
+                # (issue #7); the window is tunable via BACKFILL_CUTOFF_DAYS.
+                cutoff=config.backfill_cutoff(),
             )
         except CreatorResolutionError as exc:
             logger.error("%s", exc)

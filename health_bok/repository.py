@@ -13,7 +13,13 @@ from datetime import datetime
 
 import psycopg
 
-from .models import CreatorIdentity, FetchedTranscript, Provenance, TranscriptSegment
+from .models import (
+    CandidateMetadata,
+    CreatorIdentity,
+    FetchedTranscript,
+    Provenance,
+    TranscriptSegment,
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,22 @@ class ArchivedSummary:
     title: str
     url: str
     body: str
+
+
+@dataclass(frozen=True)
+class StoredCandidate:
+    """A persisted backfill Candidate, read back for the approval queue / tests.
+
+    Metadata only — no Transcript or Summary — carrying the Creator's stable
+    `channel_id` so a Candidate stays attributable to whom it was backfilled for.
+    """
+
+    video_id: str
+    channel_id: str
+    title: str
+    description: str
+    url: str
+    published_at: datetime
 
 
 class Repository:
@@ -58,6 +80,31 @@ class Repository:
                 "SELECT channel_id, name FROM creators ORDER BY created_at, id"
             )
             return [CreatorIdentity(channel_id=r[0], name=r[1]) for r in cur.fetchall()]
+
+    def list_candidates(self) -> list[StoredCandidate]:
+        """Every stored backfill Candidate, newest published first.
+
+        The owner's approval queue reads this (a later slice); the backfill tests
+        assert on it to confirm only metadata is stored and the cutoff is honored.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.video_id, cr.channel_id, c.title, c.description, "
+                "       c.url, c.published_at "
+                "FROM candidates c JOIN creators cr ON cr.id = c.creator_id "
+                "ORDER BY c.published_at DESC, c.video_id"
+            )
+            return [
+                StoredCandidate(
+                    video_id=r[0],
+                    channel_id=r[1],
+                    title=r[2],
+                    description=r[3],
+                    url=r[4],
+                    published_at=r[5],
+                )
+                for r in cur.fetchall()
+            ]
 
     def processed_video_ids(self) -> set[str]:
         """The set of videos whose Transcript and Summary are both persisted.
@@ -148,6 +195,32 @@ class Repository:
                 (identity.channel_id, identity.name),
             )
             return cur.fetchone()[0]
+
+    def add_candidate(self, creator_id: int, candidate: CandidateMetadata) -> bool:
+        """Persist a metadata-only backfill Candidate; idempotent on video_id.
+
+        Returns whether a row was actually inserted, so a re-run can report only
+        genuinely new Candidates. No Transcript or Summary is written — a backfill
+        Candidate is metadata only until the owner approves it (ADR-0004).
+        Re-running backfill (e.g. re-adding the Creator) inserts nothing for a
+        video already stored. Does not commit — the caller owns the transaction
+        so a Creator and its Candidates land together.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO candidates (video_id, creator_id, url, title, "
+                "description, published_at) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (video_id) DO NOTHING",
+                (
+                    candidate.video_id,
+                    creator_id,
+                    candidate.url,
+                    candidate.title,
+                    candidate.description,
+                    candidate.published_at,
+                ),
+            )
+            return cur.rowcount > 0
 
     def remove_creator(self, channel_id: str) -> bool:
         """Drop a Creator from the watch list; return whether a row was removed."""
