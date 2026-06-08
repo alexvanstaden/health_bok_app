@@ -2,12 +2,16 @@
 
 Combines two free, key-less sources: `yt-dlp` for the video's metadata
 (provenance) and `youtube-transcript-api` for its timestamped captions (the
-Transcript). The Whisper fallback for caption-less videos lands in a later
-slice; this slice covers the free caption path only.
+Transcript). When a video has no captions, `fetch_transcript` returns ``None``
+and the caller falls back to `fetch_audio` + the Whisper `Transcriber` — yt-dlp
+also does the audio download here, keeping every YouTube concern behind this one
+adapter while transcription stays a separate seam.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -15,6 +19,7 @@ from datetime import datetime, timezone
 from ..models import (
     CreatorIdentity,
     CreatorResolutionError,
+    FetchedAudio,
     FetchedTranscript,
     Provenance,
     TranscriptSegment,
@@ -78,11 +83,39 @@ class YouTubeContentSource:
             if element.text
         ]
 
-    def fetch_transcript(self, video_id: str) -> FetchedTranscript:
-        provenance = self._fetch_provenance(video_id)
+    def fetch_transcript(self, video_id: str) -> FetchedTranscript | None:
+        # Captions are checked first: a caption-less video returns None without
+        # the (wasted) metadata fetch, and the caller falls back to Whisper.
         segments = self._fetch_segments(video_id)
+        if segments is None:
+            return None
+        provenance = self._fetch_provenance(video_id)
         return FetchedTranscript(
             provenance=provenance, segments=segments, source="captions"
+        )
+
+    def fetch_audio(self, video_id: str) -> FetchedAudio:
+        # Only the daily path reaches here, and only for caption-less videos
+        # (PRD #1, user stories 10, 29). yt-dlp grabs the smallest standalone
+        # audio stream — no ffmpeg post-processing — which Whisper accepts as-is.
+        from yt_dlp import YoutubeDL
+
+        provenance = self._fetch_provenance(video_id)
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        with tempfile.TemporaryDirectory() as workdir:
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(workdir, "%(id)s.%(ext)s"),
+            }
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            path = ydl.prepare_filename(info)
+            with open(path, "rb") as handle:
+                data = handle.read()
+        return FetchedAudio(
+            provenance=provenance, data=data, suffix=os.path.splitext(path)[1]
         )
 
     def _fetch_provenance(self, video_id: str) -> Provenance:
@@ -102,10 +135,24 @@ class YouTubeContentSource:
             published_at=_parse_upload_date(info.get("upload_date")),
         )
 
-    def _fetch_segments(self, video_id: str) -> list[TranscriptSegment]:
+    def _fetch_segments(self, video_id: str) -> list[TranscriptSegment] | None:
         from youtube_transcript_api import YouTubeTranscriptApi
 
-        raw = YouTubeTranscriptApi.get_transcript(video_id)
+        try:
+            from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled
+        except ImportError:  # exception layout differs across library versions
+            from youtube_transcript_api._errors import (
+                NoTranscriptFound,
+                TranscriptsDisabled,
+            )
+
+        try:
+            raw = YouTubeTranscriptApi.get_transcript(video_id)
+        except (TranscriptsDisabled, NoTranscriptFound):
+            # No captions for this video — signal absence so the caller falls
+            # back to Whisper. A genuine fetch failure still raises and is
+            # isolated as a per-video error.
+            return None
         return [
             TranscriptSegment(
                 text=entry["text"],

@@ -21,6 +21,7 @@ import sys
 from . import config, creators
 from .adapters.claude import ClaudeSummarizer
 from .adapters.resend import ResendDigestSender
+from .adapters.whisper import WhisperTranscriber
 from .adapters.youtube import YouTubeContentSource
 from .config import Config
 from .db import connect, init_schema
@@ -71,6 +72,7 @@ def _cmd_run(_args: argparse.Namespace) -> int:
         repo = Repository(conn)
         result = run_job(
             content_source=YouTubeContentSource(),
+            transcriber=WhisperTranscriber(cfg.openai_api_key),
             summarizer=ClaudeSummarizer(cfg.anthropic_api_key, cfg.claude_model),
             digest_sender=ResendDigestSender(
                 cfg.resend_api_key, cfg.digest_from, cfg.digest_recipient

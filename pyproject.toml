@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "psycopg[binary]>=3.1",
     "anthropic>=0.40",
+    "openai>=1.50",
     "resend>=2.0",
     "youtube-transcript-api>=0.6",
     "yt-dlp>=2024.0",

@@ -33,9 +33,16 @@ failed Digest send retries without re-summarizing ("sent" is tracked separately
 from "processed"), and one Creator's error never aborts the rest of the run. The
 job is wired to run daily at ~6am — see [Schedule the daily job](#schedule-the-daily-job).
 
-Everything else — the Whisper fallback for caption-less videos, map-reduce
-summarization of long videos, backfill Candidates, and all of Part 2 (the
-knowledge graph) — is deferred to later slices.
+**Slice 4 — Whisper fallback for caption-less videos (issue #5).** Free YouTube
+captions are still preferred, but when a *new* video has none, the daily job
+downloads its audio with `yt-dlp` and transcribes it via the OpenAI **Whisper**
+API, then continues through the normal spine — so no video is skipped for lack
+of captions. Which transcript source was used (`captions` vs `whisper`) is
+recorded on the video's provenance. Whisper runs **only** on the daily path,
+never for backfill.
+
+Everything else — map-reduce summarization of long videos, backfill Candidates,
+and all of Part 2 (the knowledge graph) — is deferred to later slices.
 
 ## Architecture
 
@@ -43,12 +50,13 @@ A single self-hosted **Postgres** is the only source of truth (ADR-0003). The
 raw Transcript is the permanent record; the Summary is disposable and
 re-derivable (ADR-0001). No graph/entity extraction runs here.
 
-Three **ports** isolate every external boundary so the job can be tested with
+Four **ports** isolate every external boundary so the job can be tested with
 fakes while Postgres stays real:
 
 | Port            | Real adapter (`health_bok/adapters/`) | Service             |
 | --------------- | ------------------------------------- | ------------------- |
-| `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, discovers new uploads via RSS, fetches captions |
+| `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
+| `Transcriber`   | `whisper.py`                          | OpenAI Whisper — transcribes a caption-less video's audio (daily path only) |
 | `Summarizer`    | `claude.py`                           | Claude API          |
 | `DigestSender`  | `resend.py`                           | Resend              |
 
@@ -56,14 +64,14 @@ fakes while Postgres stays real:
 health_bok/
 ├── config.py        env-var configuration (no secrets in code)
 ├── models.py        domain types (CreatorIdentity, Transcript, Provenance, Summary, Digest)
-├── ports.py         the three port protocols
+├── ports.py         the four port protocols
 ├── db.py            Postgres connection + schema bootstrap
 ├── schema.sql       creators / videos / transcripts / summaries / processing_state
 ├── repository.py    persistence (creators, archive, summarize, mark processed/sent)
 ├── creators.py      Creator-management service (add / remove the watch list)
 ├── job.py           the orchestrator (run_job): RSS detect → spine → one Digest
 ├── main.py          CLI: `run` (daily job) + `creators add|remove|list`
-└── adapters/        youtube · claude · resend
+└── adapters/        youtube · whisper · claude · resend
 
 deploy/              cron + systemd units that run the job daily (~6am)
 ```
@@ -88,7 +96,7 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `RESEND_API_KEY`           | Resend — the DigestSender                          |
 | `DIGEST_FROM`              | Verified Resend "from" address                      |
 | `DIGEST_RECIPIENT`         | Where the Digest is delivered                       |
-| `OPENAI_API_KEY`           | Whisper fallback (read now, used in a later slice)  |
+| `OPENAI_API_KEY`           | OpenAI Whisper — transcribes caption-less videos    |
 
 ## Run the pipeline
 
@@ -102,7 +110,9 @@ watched Creator (see [Manage Creators](#manage-creators) to populate the list):
 
 1. fetch each Creator's YouTube RSS feed and find new uploads by diffing the
    feed's video IDs against the already-processed set;
-2. run only the new videos through the spine (Transcript → archive → Summary);
+2. run only the new videos through the spine (Transcript → archive → Summary),
+   acquiring the Transcript from free YouTube captions when present and falling
+   back to **Whisper** (audio download → transcription) when the video has none;
 3. bundle the run's new Summaries into **one Digest** and email it — sent only
    when there is new content.
 
@@ -161,7 +171,9 @@ The primary tests drive the whole job end-to-end with the three ports faked and 
 **real ephemeral Postgres** (spun up via `testcontainers`), asserting on the
 persisted records and the captured Digest. `test_daily_job.py` covers detection
 across Creators, idempotent re-run, the empty day, per-Creator failure isolation,
-and the retriable failed send. It needs Docker running.
+and the retriable failed send; `test_transcript_fallback.py` covers the
+captions-vs-Whisper decision (captions used when present, Whisper when absent,
+and the source recorded either way). They need Docker running.
 
 ```bash
 source .venv/bin/activate

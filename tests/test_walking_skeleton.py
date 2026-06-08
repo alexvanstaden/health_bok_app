@@ -23,7 +23,12 @@ from health_bok.models import (
     TranscriptSegment,
 )
 from health_bok.repository import Repository
-from tests.fakes import FakeContentSource, FakeDigestSender, FakeSummarizer
+from tests.fakes import (
+    FakeContentSource,
+    FakeDigestSender,
+    FakeSummarizer,
+    FakeTranscriber,
+)
 
 MODEL = "claude-sonnet-4-6"
 SUMMARY_TEXT = "This video argues that zone-2 cardio improves mitochondrial density."
@@ -57,6 +62,7 @@ def seed_creator(repo: Repository) -> None:
 def run(repo, content_source, summarizer, digest_sender):
     return run_job(
         content_source=content_source,
+        transcriber=FakeTranscriber(),
         summarizer=summarizer,
         digest_sender=digest_sender,
         repo=repo,

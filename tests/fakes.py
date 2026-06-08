@@ -11,7 +11,9 @@ from health_bok.models import (
     CreatorIdentity,
     CreatorResolutionError,
     Digest,
+    FetchedAudio,
     FetchedTranscript,
+    TranscriptSegment,
 )
 
 
@@ -22,14 +24,17 @@ class FakeContentSource:
       first — what the daily job diffs against the processed set.
     * `transcripts` maps a video_id to the FetchedTranscript its fetch returns;
       a single `transcript` is the fallback when a video isn't in the map.
+    * `audio` maps a video_id to the FetchedAudio its audio download returns. A
+      video listed here but *not* in `transcripts` has no captions, so
+      `fetch_transcript` returns ``None`` for it and the job falls back to Whisper.
     * `errors` maps a channel_id *or* a video_id to an exception to raise when
       that channel is discovered or that video is fetched, so failure-isolation
       tests can make exactly one Creator or video blow up.
     * `identities` maps a reference (@handle or URL) to the CreatorIdentity it
       resolves to; an unmapped reference raises CreatorResolutionError.
 
-    Calls are recorded (`discovered`, `fetched_video_ids`, `resolved`) so tests
-    can assert what the job did and did not touch.
+    Calls are recorded (`discovered`, `fetched_video_ids`, `audio_fetched`,
+    `resolved`) so tests can assert what the job did and did not touch.
     """
 
     def __init__(
@@ -38,14 +43,17 @@ class FakeContentSource:
         identities: dict[str, CreatorIdentity] | None = None,
         feeds: dict[str, list[str]] | None = None,
         transcripts: dict[str, FetchedTranscript] | None = None,
+        audio: dict[str, FetchedAudio] | None = None,
         errors: dict[str, Exception] | None = None,
     ):
         self._transcript = transcript
         self._transcripts = dict(transcripts or {})
+        self._audio = dict(audio or {})
         self._feeds = dict(feeds or {})
         self._errors = dict(errors or {})
         self._identities = dict(identities or {})
         self.fetched_video_ids: list[str] = []
+        self.audio_fetched: list[str] = []
         self.discovered: list[str] = []
         self.resolved: list[str] = []
 
@@ -62,11 +70,41 @@ class FakeContentSource:
             raise self._errors[channel_id]
         return list(self._feeds.get(channel_id, []))
 
-    def fetch_transcript(self, video_id: str) -> FetchedTranscript:
+    def fetch_transcript(self, video_id: str) -> FetchedTranscript | None:
         self.fetched_video_ids.append(video_id)
         if video_id in self._errors:
             raise self._errors[video_id]
-        return self._transcripts.get(video_id, self._transcript)
+        if video_id in self._transcripts:
+            return self._transcripts[video_id]
+        # Known only as audio (no captions) -> signal absence for the Whisper path.
+        if video_id in self._audio:
+            return None
+        return self._transcript
+
+    def fetch_audio(self, video_id: str) -> FetchedAudio:
+        self.audio_fetched.append(video_id)
+        if video_id in self._errors:
+            raise self._errors[video_id]
+        return self._audio[video_id]
+
+
+class FakeTranscriber:
+    """Fakes the Whisper Transcriber: returns canned segments, records its calls.
+
+    Records the video_id of every audio it transcribed (via the audio's
+    provenance), so the fallback test can assert Whisper ran for exactly the
+    caption-less videos and was never touched when captions were present.
+    """
+
+    def __init__(self, segments: list[TranscriptSegment] | None = None):
+        self._segments = segments or [
+            TranscriptSegment(text="whisper transcript", start=0.0, duration=1.0)
+        ]
+        self.transcribed: list[str] = []
+
+    def transcribe(self, audio: FetchedAudio) -> list[TranscriptSegment]:
+        self.transcribed.append(audio.provenance.video_id)
+        return list(self._segments)
 
 
 class FakeSummarizer:

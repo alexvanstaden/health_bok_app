@@ -93,6 +93,22 @@ class FetchedTranscript:
 
 
 @dataclass(frozen=True)
+class FetchedAudio:
+    """A caption-less video's downloaded audio plus provenance (PRD #1, story 10).
+
+    Returned by a ContentSource only when a *new* video has no captions, so the
+    daily job can fall back to Whisper transcription (user story 10). Carries the
+    same provenance the caption path would have, because the failed caption fetch
+    yields none. Only the daily path ever fetches audio — backfill never does
+    (user story 29), so this never enters the cheap Creator-add path.
+    """
+
+    provenance: Provenance
+    data: bytes
+    suffix: str  # container/extension yt-dlp produced, e.g. ".m4a" — names the upload
+
+
+@dataclass(frozen=True)
 class DigestItem:
     """One video's entry in the Digest: its Summary and a link to the source."""
 
