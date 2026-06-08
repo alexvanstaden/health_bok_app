@@ -28,6 +28,7 @@ from .db import connect, init_schema
 from .job import run_job
 from .models import CreatorResolutionError
 from .repository import Repository
+from .summarizer import MapReduceSummarizer
 
 logger = logging.getLogger("health_bok")
 
@@ -73,7 +74,12 @@ def _cmd_run(_args: argparse.Namespace) -> int:
         result = run_job(
             content_source=YouTubeContentSource(),
             transcriber=WhisperTranscriber(cfg.openai_api_key),
-            summarizer=ClaudeSummarizer(cfg.anthropic_api_key, cfg.claude_model),
+            # Long Transcripts are map-reduced; short ones summarize in one pass.
+            summarizer=MapReduceSummarizer(
+                ClaudeSummarizer(cfg.anthropic_api_key, cfg.claude_model),
+                max_chars=cfg.summary_max_chars,
+                chunk_chars=cfg.summary_chunk_chars,
+            ),
             digest_sender=ResendDigestSender(
                 cfg.resend_api_key, cfg.digest_from, cfg.digest_recipient
             ),

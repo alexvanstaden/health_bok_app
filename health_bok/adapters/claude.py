@@ -1,8 +1,10 @@
 """Claude adapter for the Summarizer port.
 
-Single-shot summarization of one Transcript into prose. Map-reduce chunking for
-very long Transcripts is a later slice; this slice covers the thin path. The
-model is configurable (default claude-sonnet-4-6) to trade cost against quality.
+Single-pass summarization of one Transcript into prose — the thin path. Long
+Transcripts are handled by `MapReduceSummarizer` (health_bok.summarizer), which
+wraps this adapter and calls it once per section and once to reduce, so this
+adapter stays single-pass and length-agnostic. The model is configurable
+(default claude-sonnet-4-6) to trade cost against quality.
 """
 
 from __future__ import annotations
