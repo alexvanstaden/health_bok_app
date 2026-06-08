@@ -41,8 +41,16 @@ of captions. Which transcript source was used (`captions` vs `whisper`) is
 recorded on the video's provenance. Whisper runs **only** on the daily path,
 never for backfill.
 
-Everything else — map-reduce summarization of long videos, backfill Candidates,
-and all of Part 2 (the knowledge graph) — is deferred to later slices.
+**Slice 5 — map-reduce summarization for long videos (issue #6).** Short
+Transcripts still summarize in a single Claude call. A Transcript longer than a
+configurable threshold (`SUMMARY_MAX_CHARS`) is split on segment boundaries into
+sections of at most `SUMMARY_CHUNK_CHARS`, each section is summarized, and those
+section Summaries are reduced — through the same Summarizer — into one final
+**Summary**. Map-reduce is transparent to the job: the final Summary is persisted
+and digested like any other, so a multi-hour podcast never breaks the pipeline.
+
+Everything else — backfill Candidates and all of Part 2 (the knowledge graph) —
+is deferred to later slices.
 
 ## Architecture
 
@@ -57,7 +65,7 @@ fakes while Postgres stays real:
 | --------------- | ------------------------------------- | ------------------- |
 | `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
 | `Transcriber`   | `whisper.py`                          | OpenAI Whisper — transcribes a caption-less video's audio (daily path only) |
-| `Summarizer`    | `claude.py`                           | Claude API          |
+| `Summarizer`    | `claude.py` (single pass), wrapped by `summarizer.py` (map-reduce for long Transcripts) | Claude API          |
 | `DigestSender`  | `resend.py`                           | Resend              |
 
 ```
@@ -69,6 +77,7 @@ health_bok/
 ├── schema.sql       creators / videos / transcripts / summaries / processing_state
 ├── repository.py    persistence (creators, archive, summarize, mark processed/sent)
 ├── creators.py      Creator-management service (add / remove the watch list)
+├── summarizer.py    MapReduceSummarizer: chunk + reduce long Transcripts
 ├── job.py           the orchestrator (run_job): RSS detect → spine → one Digest
 ├── main.py          CLI: `run` (daily job) + `creators add|remove|list`
 └── adapters/        youtube · whisper · claude · resend
@@ -93,6 +102,8 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `DATABASE_URL`             | Postgres connection (the single source of truth)   |
 | `ANTHROPIC_API_KEY`        | Claude — the Summarizer                            |
 | `CLAUDE_MODEL`             | Summarization model (default `claude-sonnet-4-6`)  |
+| `SUMMARY_MAX_CHARS`        | Map-reduce above this Transcript length (default `48000`) |
+| `SUMMARY_CHUNK_CHARS`      | Section size when map-reducing (default `16000`)   |
 | `RESEND_API_KEY`           | Resend — the DigestSender                          |
 | `DIGEST_FROM`              | Verified Resend "from" address                      |
 | `DIGEST_RECIPIENT`         | Where the Digest is delivered                       |
@@ -112,7 +123,8 @@ watched Creator (see [Manage Creators](#manage-creators) to populate the list):
    feed's video IDs against the already-processed set;
 2. run only the new videos through the spine (Transcript → archive → Summary),
    acquiring the Transcript from free YouTube captions when present and falling
-   back to **Whisper** (audio download → transcription) when the video has none;
+   back to **Whisper** (audio download → transcription) when the video has none,
+   and summarizing long Transcripts via map-reduce (chunk → summarize → reduce);
 3. bundle the run's new Summaries into **one Digest** and email it — sent only
    when there is new content.
 
@@ -174,6 +186,8 @@ across Creators, idempotent re-run, the empty day, per-Creator failure isolation
 and the retriable failed send; `test_transcript_fallback.py` covers the
 captions-vs-Whisper decision (captions used when present, Whisper when absent,
 and the source recorded either way). They need Docker running.
+`test_map_reduce_summarizer.py` is a pure unit test of the chunk/reduce path
+(faked Summarizer, no Postgres) and needs no Docker.
 
 ```bash
 source .venv/bin/activate
