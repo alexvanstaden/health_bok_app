@@ -13,6 +13,33 @@ from datetime import datetime
 YOUTUBE_WATCH = "https://www.youtube.com/watch?v="
 
 
+class CreatorResolutionError(RuntimeError):
+    """An @handle or URL could not be resolved to a Creator's identity.
+
+    Raised by a ContentSource when a reference names no reachable channel (a typo,
+    a deleted channel, or an unsupported URL), so adding a Creator fails loudly
+    rather than persisting a half-identified row.
+    """
+
+    def __init__(self, reference: str):
+        super().__init__(f"could not resolve a Creator from {reference!r}")
+        self.reference = reference
+
+
+@dataclass(frozen=True)
+class CreatorIdentity:
+    """A Creator's stable identity (CONTEXT.md, PRD #1 user story 4).
+
+    The `channel_id` is YouTube's permanent identifier; the @handle used to add a
+    Creator is a mutable alias resolved to this once at add-time (user story 2),
+    so daily RSS polling and video attribution key off the stable id, never the
+    handle. `name` is the channel's display name at resolution time.
+    """
+
+    channel_id: str
+    name: str
+
+
 @dataclass(frozen=True)
 class Provenance:
     """Everything that traces a Transcript back to its origin (PRD #1).

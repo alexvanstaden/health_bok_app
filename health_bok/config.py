@@ -34,6 +34,16 @@ def _require(name: str) -> str:
     return value
 
 
+def database_url() -> str:
+    """The single source-of-truth Postgres URL (ADR-0003).
+
+    Creator-management commands need only this, not the email/LLM secrets, so
+    editing the watch list never requires the Digest or Summarizer keys to be
+    present.
+    """
+    return _require("DATABASE_URL")
+
+
 @dataclass(frozen=True)
 class Config:
     """Runtime configuration assembled from environment variables."""

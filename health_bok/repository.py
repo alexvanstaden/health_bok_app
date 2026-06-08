@@ -13,7 +13,7 @@ from datetime import datetime
 
 import psycopg
 
-from .models import FetchedTranscript, Provenance, TranscriptSegment
+from .models import CreatorIdentity, FetchedTranscript, Provenance, TranscriptSegment
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,18 @@ class Repository:
         self._conn.commit()
 
     # -- reads ---------------------------------------------------------------
+
+    def list_creators(self) -> list[CreatorIdentity]:
+        """Return every watched Creator's stable identity, oldest first.
+
+        This is the watch list the daily job reads to know whom to poll
+        (PRD #1, user story 5).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT channel_id, name FROM creators ORDER BY created_at, id"
+            )
+            return [CreatorIdentity(channel_id=r[0], name=r[1]) for r in cur.fetchall()]
 
     def is_processed(self, video_id: str) -> bool:
         """True once both Transcript and Summary are durably persisted.
@@ -94,6 +106,28 @@ class Repository:
         ]
 
     # -- writes --------------------------------------------------------------
+
+    def add_creator(self, identity: CreatorIdentity) -> int:
+        """Persist a Creator by stable identity; idempotent on channel_id.
+
+        Re-adding an existing Creator refreshes its display name but never
+        creates a duplicate (PRD #1, user stories 3-4). Like the other writes,
+        this does not commit — the caller owns the transaction boundary.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO creators (channel_id, name) VALUES (%s, %s) "
+                "ON CONFLICT (channel_id) DO UPDATE SET name = EXCLUDED.name "
+                "RETURNING id",
+                (identity.channel_id, identity.name),
+            )
+            return cur.fetchone()[0]
+
+    def remove_creator(self, channel_id: str) -> bool:
+        """Drop a Creator from the watch list; return whether a row was removed."""
+        with self._conn.cursor() as cur:
+            cur.execute("DELETE FROM creators WHERE channel_id = %s", (channel_id,))
+            return cur.rowcount > 0
 
     def archive_transcript(
         self, fetched: FetchedTranscript, *, retrieved_at: datetime
@@ -167,11 +201,8 @@ class Repository:
     # -- helpers -------------------------------------------------------------
 
     def _upsert_creator(self, prov: Provenance) -> int:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO creators (channel_id, name) VALUES (%s, %s) "
-                "ON CONFLICT (channel_id) DO UPDATE SET name = EXCLUDED.name "
-                "RETURNING id",
-                (prov.channel_id, prov.channel_name),
-            )
-            return cur.fetchone()[0]
+        # A video's provenance carries the same stable identity the watch list
+        # stores, so archiving and Creator-management share one upsert path.
+        return self.add_creator(
+            CreatorIdentity(channel_id=prov.channel_id, name=prov.channel_name)
+        )
