@@ -8,6 +8,8 @@ slice; this slice covers the free caption path only.
 
 from __future__ import annotations
 
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 from ..models import (
@@ -19,6 +21,15 @@ from ..models import (
 )
 
 YOUTUBE_BASE = "https://www.youtube.com"
+
+# YouTube publishes each channel's latest uploads as an Atom feed keyed by the
+# stable channel_id — keyless and free, exactly what the daily diff needs.
+RSS_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id="
+_FEED_NS = {
+    "atom": "http://www.w3.org/2005/Atom",
+    "yt": "http://www.youtube.com/xml/schemas/2015",
+}
+_FEED_TIMEOUT = 30
 
 
 class YouTubeContentSource:
@@ -51,6 +62,21 @@ class YouTubeContentSource:
         if not channel_id or not name:
             raise CreatorResolutionError(reference)
         return CreatorIdentity(channel_id=channel_id, name=name)
+
+    def discover_videos(self, channel_id: str) -> list[str]:
+        # Parse the channel's Atom upload feed with the stdlib — no API key, no
+        # quota, no third-party SDK. Returns the latest video IDs newest-first;
+        # the daily job diffs them against the already-processed set.
+        url = f"{RSS_FEED}{channel_id}"
+        request = urllib.request.Request(url, headers={"User-Agent": "health-bok"})
+        with urllib.request.urlopen(request, timeout=_FEED_TIMEOUT) as response:
+            feed = response.read()
+        root = ET.fromstring(feed)
+        return [
+            element.text
+            for element in root.iterfind("atom:entry/yt:videoId", _FEED_NS)
+            if element.text
+        ]
 
     def fetch_transcript(self, video_id: str) -> FetchedTranscript:
         provenance = self._fetch_provenance(video_id)

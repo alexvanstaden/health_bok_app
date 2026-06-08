@@ -31,6 +31,17 @@ class ContentSource(Protocol):
         """
         ...
 
+    def discover_videos(self, channel_id: str) -> list[str]:
+        """Return the channel's recent video IDs, newest first (PRD #1, story 5).
+
+        The daily job diffs these against the already-processed set to find new
+        uploads. YouTube's RSS feed surfaces only the latest handful of videos,
+        which is all a daily run needs; full back-catalogue listing is a separate,
+        later concern. Raises on a feed it cannot reach, so the job can isolate a
+        single Creator's failure without aborting the run.
+        """
+        ...
+
     def fetch_transcript(self, video_id: str) -> FetchedTranscript:
         """Fetch the video's Transcript (with timestamps) and full provenance."""
         ...

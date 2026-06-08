@@ -15,10 +15,6 @@ from dataclasses import dataclass
 # a higher-quality model via CLAUDE_MODEL (PRD #1, user story 17).
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 
-# Slice-1 walking skeleton runs against one known video; a hardcoded default is
-# fine, but it stays overridable so the entrypoint is not literally a constant.
-DEFAULT_VIDEO_ID = "dQw4w9WgXcQ"
-
 
 class ConfigError(RuntimeError):
     """A required environment variable is missing."""
@@ -55,7 +51,6 @@ class Config:
     claude_model: str
     digest_from: str
     digest_recipient: str
-    video_id: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -74,5 +69,4 @@ class Config:
             claude_model=os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
             digest_from=_require("DIGEST_FROM"),
             digest_recipient=_require("DIGEST_RECIPIENT"),
-            video_id=os.environ.get("WALKING_SKELETON_VIDEO_ID", DEFAULT_VIDEO_ID),
         )

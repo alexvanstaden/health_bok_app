@@ -22,9 +22,20 @@ stored with the Creator's name as a stable identity. Re-adding the same Creator
 (even via a different handle/URL that resolves to the same channel) never
 duplicates it. The daily job reads this list. See [Manage Creators](#manage-creators).
 
-Everything else — RSS discovery against the watch list, the Whisper fallback,
-map-reduce summarization of long videos, backfill Candidates, and all of Part 2
-(the knowledge graph) — is deferred to later slices.
+**Slice 3 — daily detection across Creators (issue #4).** The real daily job.
+For **every** watched Creator it fetches the YouTube RSS feed and detects new
+uploads by diffing the feed's video IDs against the already-processed set. Only
+the new videos run through the spine (Transcript → archive → Summary); all of a
+run's new Summaries are bundled into **one Digest** and emailed — but only when
+there is new content. It is idempotent (a video is marked processed only after
+its Transcript *and* Summary are persisted, so a re-run reprocesses nothing), a
+failed Digest send retries without re-summarizing ("sent" is tracked separately
+from "processed"), and one Creator's error never aborts the rest of the run. The
+job is wired to run daily at ~6am — see [Schedule the daily job](#schedule-the-daily-job).
+
+Everything else — the Whisper fallback for caption-less videos, map-reduce
+summarization of long videos, backfill Candidates, and all of Part 2 (the
+knowledge graph) — is deferred to later slices.
 
 ## Architecture
 
@@ -37,7 +48,7 @@ fakes while Postgres stays real:
 
 | Port            | Real adapter (`health_bok/adapters/`) | Service             |
 | --------------- | ------------------------------------- | ------------------- |
-| `ContentSource` | `youtube.py`                          | YouTube (yt-dlp + captions); also resolves an @handle/URL to a `channel_id` |
+| `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, discovers new uploads via RSS, fetches captions |
 | `Summarizer`    | `claude.py`                           | Claude API          |
 | `DigestSender`  | `resend.py`                           | Resend              |
 
@@ -50,9 +61,11 @@ health_bok/
 ├── schema.sql       creators / videos / transcripts / summaries / processing_state
 ├── repository.py    persistence (creators, archive, summarize, mark processed/sent)
 ├── creators.py      Creator-management service (add / remove the watch list)
-├── job.py           the orchestrator (run_job)
+├── job.py           the orchestrator (run_job): RSS detect → spine → one Digest
 ├── main.py          CLI: `run` (daily job) + `creators add|remove|list`
 └── adapters/        youtube · claude · resend
+
+deploy/              cron + systemd units that run the job daily (~6am)
 ```
 
 ## Setup
@@ -76,7 +89,6 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `DIGEST_FROM`              | Verified Resend "from" address                      |
 | `DIGEST_RECIPIENT`         | Where the Digest is delivered                       |
 | `OPENAI_API_KEY`           | Whisper fallback (read now, used in a later slice)  |
-| `WALKING_SKELETON_VIDEO_ID`| The one video slice 1 processes                     |
 
 ## Run the pipeline
 
@@ -85,10 +97,21 @@ source .venv/bin/activate
 health-bok            # or: health-bok run, or: python -m health_bok
 ```
 
-This applies the schema if needed, then runs the job for `WALKING_SKELETON_VIDEO_ID`.
-It is **idempotent**: re-running reprocesses nothing already archived+summarized
-and sends no second email. A failed Digest send can be retried without
-re-summarizing.
+This applies the schema if needed, then runs the daily job across **every**
+watched Creator (see [Manage Creators](#manage-creators) to populate the list):
+
+1. fetch each Creator's YouTube RSS feed and find new uploads by diffing the
+   feed's video IDs against the already-processed set;
+2. run only the new videos through the spine (Transcript → archive → Summary);
+3. bundle the run's new Summaries into **one Digest** and email it — sent only
+   when there is new content.
+
+It is **idempotent**: a video is marked processed only after its Transcript *and*
+Summary are persisted, so re-running reprocesses nothing already done and sends
+no second email. A failed Digest send is retried on the next run without
+re-summarizing ("sent" is tracked separately from "processed"). One Creator's
+error (an unreachable feed, a missing transcript) is isolated and never aborts
+the rest of the run.
 
 ## Manage Creators
 
@@ -109,11 +132,36 @@ different handle or URL — refreshes the name but creates no duplicate. Removal
 by `channel_id` (shown by `list`), so it stays reliable even if a channel later
 changes its handle.
 
+## Schedule the daily job
+
+The job is meant to run unattended each morning (~6am). Two ready-to-edit units
+live in [`deploy/`](deploy/) — pick whichever your VPS uses; both just invoke
+`health-bok run` on a daily timer and source the deploy's `.env` for secrets.
+
+**cron** — paste [`deploy/crontab.example`](deploy/crontab.example) into `crontab -e`
+(adjust the install path and `CRON_TZ`):
+
+```cron
+CRON_TZ=UTC
+0 6 * * *  cd /opt/health_bok_app && set -a && . ./.env && set +a && .venv/bin/health-bok run >> /var/log/health-bok.log 2>&1
+```
+
+**systemd** — install the oneshot service + timer (the timer owns the 06:00
+schedule; `Persistent=true` catches a run missed while the VPS was down):
+
+```bash
+sudo cp deploy/systemd/health-bok.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now health-bok.timer
+```
+
 ## Tests
 
-The primary test drives the whole job end-to-end with the three ports faked and a
+The primary tests drive the whole job end-to-end with the three ports faked and a
 **real ephemeral Postgres** (spun up via `testcontainers`), asserting on the
-persisted records and the captured Digest. It needs Docker running.
+persisted records and the captured Digest. `test_daily_job.py` covers detection
+across Creators, idempotent re-run, the empty day, per-Creator failure isolation,
+and the retriable failed send. It needs Docker running.
 
 ```bash
 source .venv/bin/activate

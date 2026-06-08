@@ -1,0 +1,9 @@
+# Health & Longevity Digest — run the daily pipeline at 06:00 every day.
+#
+# Install:  crontab -e   then paste the line below (adjust paths + timezone).
+# Cron runs with a minimal environment, so the line sources the deploy's .env
+# (DATABASE_URL + the API keys) before invoking the CLI, and appends output to a
+# log. CRON_TZ pins the schedule to a fixed timezone regardless of the host's.
+
+CRON_TZ=UTC
+0 6 * * *  cd /opt/health_bok_app && set -a && . ./.env && set +a && .venv/bin/health-bok run >> /var/log/health-bok.log 2>&1

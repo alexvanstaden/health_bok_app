@@ -36,6 +36,15 @@ class Repository:
         """Commit the current transaction — the job's durability boundary."""
         self._conn.commit()
 
+    def rollback(self) -> None:
+        """Discard the current transaction's uncommitted work.
+
+        The daily job calls this when one Creator or video errors, so the failure
+        leaves nothing half-written and the run continues with the rest already
+        durably committed (PRD #1, user story 25).
+        """
+        self._conn.rollback()
+
     # -- reads ---------------------------------------------------------------
 
     def list_creators(self) -> list[CreatorIdentity]:
@@ -50,30 +59,47 @@ class Repository:
             )
             return [CreatorIdentity(channel_id=r[0], name=r[1]) for r in cur.fetchall()]
 
-    def is_processed(self, video_id: str) -> bool:
-        """True once both Transcript and Summary are durably persisted.
+    def processed_video_ids(self) -> set[str]:
+        """The set of videos whose Transcript and Summary are both persisted.
 
-        Used for idempotency: a processed video is never re-fetched or
-        re-summarized on a repeat run (user story 23).
+        The daily job diffs each Creator's freshly-discovered feed against this
+        set to find genuinely new uploads; a video here is never re-fetched or
+        re-summarized, which is what makes a repeat run idempotent (user stories
+        6, 23). A video only enters the set once `summarized_at` is stamped, so a
+        prior run that archived a Transcript but crashed before summarizing is
+        retried rather than skipped.
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT summarized_at IS NOT NULL "
-                "FROM processing_state WHERE video_id = %s",
-                (video_id,),
+                "SELECT video_id FROM processing_state WHERE summarized_at IS NOT NULL"
             )
-            row = cur.fetchone()
-        return bool(row and row[0])
+            return {row[0] for row in cur.fetchall()}
 
-    def digest_already_sent(self, video_id: str) -> bool:
+    def unsent_summaries(self) -> list[ArchivedSummary]:
+        """Every processed video whose Summary has not yet gone out in a Digest.
+
+        Returned oldest-published first for a chronological Digest. Bundles the
+        run's new Summaries together with any left unsent by an earlier failed
+        send, so a retry picks them all up without re-summarizing (user stories
+        18, 24). Each video contributes its latest Summary.
+        """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT digest_sent_at IS NOT NULL "
-                "FROM processing_state WHERE video_id = %s",
-                (video_id,),
+                "SELECT video_id, title, url, body FROM ("
+                "  SELECT DISTINCT ON (v.video_id) "
+                "         v.video_id, v.title, v.url, s.body, v.published_at "
+                "  FROM processing_state ps "
+                "  JOIN videos v ON v.video_id = ps.video_id "
+                "  JOIN summaries s ON s.video_id = v.video_id "
+                "  WHERE ps.summarized_at IS NOT NULL "
+                "    AND ps.digest_sent_at IS NULL "
+                "  ORDER BY v.video_id, s.created_at DESC, s.id DESC"
+                ") latest ORDER BY published_at, video_id"
             )
-            row = cur.fetchone()
-        return bool(row and row[0])
+            return [
+                ArchivedSummary(video_id=r[0], title=r[1], url=r[2], body=r[3])
+                for r in cur.fetchall()
+            ]
 
     def get_summary(self, video_id: str) -> ArchivedSummary | None:
         """Return the latest persisted Summary for a video, or None."""
