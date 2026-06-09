@@ -446,3 +446,59 @@ export type QueryAnswer = {
 export function askQuestion(question: string): Promise<QueryAnswer> {
   return post("/api/query", { question });
 }
+
+// -- The Impact engine: inbox & lifecycle (issue #18) -----------------------
+// Change detection's read/act surface. New evidence (a just-admitted
+// Claim/Protocol) and new choices (a recorded Decision/Goal) raise stance-typed
+// Impacts against the owner's anchors; the inbox is filterable by stance and
+// anchor, and each Impact walks new → reviewed → actioned | dismissed so it never
+// re-nags. Actioning records the Decision the owner revised or created in response;
+// a burst can be bulk-dismissed. Detection, dedup, and the lifecycle live server-side.
+
+export type Stance = "reinforces" | "contradicts" | "refines" | "opportunity";
+export type ImpactState = "new" | "reviewed" | "actioned" | "dismissed";
+
+export type ImpactEnd = { type: string; id: number; label: string };
+
+export type Impact = {
+  id: number;
+  source: ImpactEnd; // the Claim/Protocol that triggered it
+  anchor: ImpactEnd; // the Decision/Goal/Marker it bears on
+  stance: Stance;
+  state: ImpactState;
+  detail: string | null;
+  actioned_decision_id: number | null;
+  created_at: string;
+};
+
+export function listImpacts(filter: {
+  stance?: string;
+  anchorType?: string;
+  anchorId?: number;
+  state?: string;
+}): Promise<{ impacts: Impact[] }> {
+  return json(
+    `/api/impacts${qs({
+      stance: filter.stance,
+      anchor_type: filter.anchorType,
+      anchor_id: filter.anchorId,
+      state: filter.state,
+    })}`,
+  );
+}
+
+export function reviewImpact(id: number) {
+  return json(`/api/impacts/${id}/review`, { method: "POST" });
+}
+
+export function dismissImpact(id: number) {
+  return json(`/api/impacts/${id}/dismiss`, { method: "POST" });
+}
+
+export function actionImpact(id: number, decisionId: number) {
+  return post(`/api/impacts/${id}/action`, { decision_id: decisionId });
+}
+
+export function bulkDismissImpacts(impactIds: number[]): Promise<{ dismissed: number }> {
+  return post("/api/impacts/dismiss", { impact_ids: impactIds });
+}

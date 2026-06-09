@@ -17,6 +17,7 @@ entrypoint — never by the domain or the test suite.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator
@@ -26,9 +27,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import config, creators, curation, personal, query, review
+from . import config, creators, curation, impacts, personal, query, review
 from .adapters.answerer import ClaudeQueryAnswerer
 from .adapters.embedder import OpenAIEmbedder
+from .adapters.stance import ClaudeStanceJudge
 from .adapters.youtube import YouTubeContentSource
 from .concepts import ConceptNormalizer
 from .db import connect, init_schema
@@ -40,11 +42,14 @@ from .repository import (
     BokProtocol,
     Decision,
     Goal,
+    Impact,
     MarkerReading,
     MarkerSeries,
     Repository,
     SuggestedLink,
 )
+
+logger = logging.getLogger("health_bok.api")
 
 app = FastAPI(title="Health & Longevity Knowledge — Web App API")
 app.add_middleware(
@@ -97,6 +102,28 @@ def _normalizer(repo: Repository) -> ConceptNormalizer:
         model=model,
         merge_distance=config.concept_merge_distance(),
     )
+
+
+def _detect_anchor_impacts(repo: Repository, anchor_type: str, anchor_id: int) -> None:
+    """Run the reverse Impact pass for a just-recorded Decision/Goal (issue #18).
+
+    Best-effort and synchronous (like `/api/query`'s Claude call): the anchor is
+    already committed, so a StanceJudge failure is logged and swallowed rather than
+    failing the write. Scans the existing Body of Knowledge for evidence bearing on
+    the new anchor and raises Impacts where the judge sees genuine change.
+    """
+    try:
+        impacts.detect_for_new_anchor(
+            anchor_type,
+            anchor_id,
+            judge=ClaudeStanceJudge(config.anthropic_api_key(), config.stance_model()),
+            repo=repo,
+            candidate_limit=config.impact_candidate_limit(),
+        )
+    except Exception as exc:  # detection is a follow-on; never fail the write
+        repo.rollback()
+        logger.warning("reverse impact detection failed for %s %s: %s",
+                       anchor_type, anchor_id, exc)
 
 
 @app.get("/api/health")
@@ -625,7 +652,12 @@ def list_goals() -> dict:
 
 @app.post("/api/goals")
 def create_goal(body: NewGoal) -> dict:
-    """Record a Goal and its Concepts (normalized like a Claim's)."""
+    """Record a Goal and its Concepts (normalized like a Claim's).
+
+    A new Goal triggers the reverse Impact pass (issue #18): the existing Body of
+    Knowledge is scanned for evidence bearing on it — an unmet Goal is the prime
+    target for an `opportunity` Impact (CONTEXT.md "Goal").
+    """
     with _repo() as repo:
         goal_id = personal.record_goal(
             title=body.title,
@@ -634,6 +666,7 @@ def create_goal(body: NewGoal) -> dict:
             normalizer=_normalizer(repo),
             repo=repo,
         )
+        _detect_anchor_impacts(repo, "goal", goal_id)
     return {"id": goal_id}
 
 
@@ -714,7 +747,11 @@ def list_decisions() -> dict:
 
 @app.post("/api/decisions")
 def create_decision(body: NewDecision) -> dict:
-    """Record a Decision; an `implements_protocol_id` adopts that Protocol (issue #16)."""
+    """Record a Decision; an `implements_protocol_id` adopts that Protocol (issue #16).
+
+    A new Decision triggers the reverse Impact pass (issue #18): the existing Body of
+    Knowledge is scanned for evidence that reinforces, contradicts, or refines it.
+    """
     with _repo() as repo:
         decision_id = personal.record_decision(
             action=body.action,
@@ -730,6 +767,7 @@ def create_decision(body: NewDecision) -> dict:
             normalizer=_normalizer(repo),
             repo=repo,
         )
+        _detect_anchor_impacts(repo, "decision", decision_id)
     return {"id": decision_id}
 
 
@@ -847,3 +885,104 @@ def ask(body: Question) -> dict:
             for c in answer.citations
         ],
     }
+
+
+# == Impact engine: inbox & lifecycle (issue #18) ===========================
+#
+# Change detection's read/act surface. New Claims/Protocols (the worker, forward)
+# and new Decisions/Goals (the create endpoints above, reverse) raise Impacts; here
+# the owner reviews the inbox — filterable by stance and anchor — and walks each
+# Impact `new → reviewed → actioned | dismissed` so it never re-nags. Actioning
+# records the Decision the owner revised or created in response; a burst (e.g. after
+# a backfill approval) can be bulk-dismissed in one gesture. The lifecycle and
+# audit-trail guarantees live in the `impacts` service, not here.
+
+
+class ActionImpact(BaseModel):
+    """Actioning an Impact: the id of the Decision the owner revised or created."""
+
+    decision_id: int
+
+
+class BulkDismiss(BaseModel):
+    """The Impact ids the owner is dismissing as a burst (issue #18)."""
+
+    impact_ids: list[int]
+
+
+def _impact_dict(i: Impact) -> dict:
+    return {
+        "id": i.id,
+        "source": {"type": i.source_type, "id": i.source_id, "label": i.source_label},
+        "anchor": {"type": i.anchor_type, "id": i.anchor_id, "label": i.anchor_label},
+        "stance": i.stance,
+        "state": i.state,
+        "detail": i.detail,
+        "actioned_decision_id": i.actioned_decision_id,
+        "created_at": i.created_at.isoformat(),
+    }
+
+
+@app.get("/api/impacts")
+def list_impacts(
+    stance: str | None = None,
+    anchor_type: str | None = None,
+    anchor_id: int | None = None,
+    state: str | None = None,
+) -> dict:
+    """The Impact inbox — unresolved findings, filterable by stance and anchor.
+
+    With no `state` the unresolved (`new`/`reviewed`) Impacts show; an explicit
+    `state` narrows to that lifecycle position (e.g. to review what was dismissed).
+    """
+    with _repo() as repo:
+        found = impacts.inbox(
+            stance=stance,
+            anchor_type=anchor_type,
+            anchor_id=anchor_id,
+            state=state,
+            repo=repo,
+        )
+    return {"impacts": [_impact_dict(i) for i in found]}
+
+
+@app.post("/api/impacts/{impact_id}/review")
+def review_impact(impact_id: int) -> dict:
+    """Mark an Impact reviewed — the owner has seen it (issue #18)."""
+    with _repo() as repo:
+        ok = impacts.review_impact(impact_id, repo=repo)
+    if not ok:
+        raise HTTPException(status_code=404, detail="impact not found")
+    return {"id": impact_id, "state": "reviewed"}
+
+
+@app.post("/api/impacts/{impact_id}/dismiss")
+def dismiss_impact(impact_id: int) -> dict:
+    """Dismiss an Impact so it never re-nags (issue #18)."""
+    with _repo() as repo:
+        ok = impacts.dismiss_impact(impact_id, repo=repo)
+    if not ok:
+        raise HTTPException(status_code=404, detail="impact not found")
+    return {"id": impact_id, "state": "dismissed"}
+
+
+@app.post("/api/impacts/{impact_id}/action")
+def action_impact(impact_id: int, body: ActionImpact) -> dict:
+    """Action an Impact, recording the Decision it produced (issue #18).
+
+    The owner revised or created a Decision in response; this records the link so the
+    audit trail shows change detection driving change.
+    """
+    with _repo() as repo:
+        ok = impacts.action_impact(impact_id, decision_id=body.decision_id, repo=repo)
+    if not ok:
+        raise HTTPException(status_code=404, detail="impact not found")
+    return {"id": impact_id, "state": "actioned", "decision_id": body.decision_id}
+
+
+@app.post("/api/impacts/dismiss")
+def bulk_dismiss_impacts(body: BulkDismiss) -> dict:
+    """Bulk-dismiss a burst of Impacts; returns how many were dismissed (issue #18)."""
+    with _repo() as repo:
+        dismissed = impacts.bulk_dismiss(body.impact_ids, repo=repo)
+    return {"dismissed": dismissed}

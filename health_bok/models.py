@@ -441,3 +441,48 @@ class Answer:
     text: str
     citations: list[Citation] = field(default_factory=list)
     abstained: bool = False
+
+
+# -- Impact engine: bidirectional change detection (issue #18) ----------------
+#
+# Candidate generation pairs a piece of newly-arrived *knowledge* (a Claim or
+# Protocol) with an existing owner *anchor* (a Decision, Goal, or Marker) that
+# shares a Concept with it; the `StanceJudge` port then weighs that one pair and
+# returns a Stance. Both shapes cross the port boundary, so — like the query
+# evidence types — they live here, carrying just what the judge needs to reason: a
+# readable rendering plus the referenced Concept names (the overlap that made them
+# candidates). The same two shapes serve *either* direction: forward, the knowledge
+# is new and the anchor existing; reverse, the anchor is new and the knowledge
+# existing.
+
+
+@dataclass(frozen=True)
+class ImpactKnowledge:
+    """A Claim or Protocol weighed against an anchor for change detection (issue #18).
+
+    `type` is `'claim'` or `'protocol'` and `id` its row id, so a raised Impact can
+    point back at the exact source. `text` is a one-line rendering (a Claim's text,
+    or a Protocol's action with its structured parameters) and `concepts` the
+    Concept names it references — what the judge reasons over.
+    """
+
+    type: str
+    id: int
+    text: str
+    concepts: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ImpactAnchor:
+    """An owner anchor a piece of knowledge may bear on (issue #18).
+
+    `type` is `'decision'`, `'goal'`, or `'marker'` and `id` its row id (a Marker's
+    is the specific dated reading), so a raised Impact points at the exact anchor.
+    `text` is a one-line rendering and `concepts` the Concept names it references —
+    the overlap the candidate was generated on, and the context the judge weighs.
+    """
+
+    type: str
+    id: int
+    text: str
+    concepts: list[str] = field(default_factory=list)

@@ -54,6 +54,13 @@ h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
 .badge.admitted { color: var(--green); border-color: var(--green); }
 .badge.failed { color: var(--red); border-color: var(--red); }
 
+/* Impact stances (issue #18): reinforces is reassuring, contradicts alarming,
+   refines a nuance, opportunity an opening. */
+.badge.stance-reinforces { color: var(--green); border-color: var(--green); }
+.badge.stance-contradicts { color: var(--red); border-color: var(--red); }
+.badge.stance-refines { color: var(--amber); border-color: var(--amber); }
+.badge.stance-opportunity { color: var(--blue, #3b82f6); border-color: var(--blue, #3b82f6); }
+
 button {
   font: inherit;
   padding: 0.4rem 0.8rem;

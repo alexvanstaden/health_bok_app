@@ -243,6 +243,33 @@ class FakeQueryAnswerer:
         return GroundedAnswer(text=text, cited_claim_ids=ids, abstained=False)
 
 
+class FakeStanceJudge:
+    """Fakes the StanceJudge port (issue #18): returns a configured Stance per pair,
+    without the Claude API — so the Impact engine is driven over *real* Concept-
+    overlap candidates from a real Postgres.
+
+    `stances` maps an anchor's rendered label (its `text`) to the Stance to return,
+    so a test can make exactly one anchor `contradicts` while the rest fall to
+    `default` — letting it assert bidirectional triggering, the `unrelated` discard,
+    and per-anchor stances deterministically. Records every `(knowledge, anchor)`
+    pair it judged, so a test can assert which candidates Concept overlap surfaced.
+    """
+
+    def __init__(
+        self,
+        *,
+        default: str = "unrelated",
+        stances: dict[str, str] | None = None,
+    ):
+        self._default = default
+        self._stances = dict(stances or {})
+        self.calls: list[tuple] = []
+
+    def judge(self, knowledge, anchor) -> str:
+        self.calls.append((knowledge, anchor))
+        return self._stances.get(anchor.text, self._default)
+
+
 def _synthesize(question: str, evidence: RetrievedEvidence) -> str:
     """A canned synthesized answer woven from the retrieved Claims (not a list)."""
     return "Based on your library: " + " ".join(c.text for c in evidence.claims)

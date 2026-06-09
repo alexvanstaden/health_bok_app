@@ -161,6 +161,26 @@ def query_evidence_limit() -> int:
     return _positive_int("QUERY_EVIDENCE_LIMIT", DEFAULT_EVIDENCE_LIMIT)
 
 
+def stance_model() -> str:
+    """The Claude model the StanceJudge uses for change detection (issue #18).
+
+    Defaults to the same Claude model as the rest of the pipeline; tunable via
+    STANCE_MODEL if judging stances warrants a different one.
+    """
+    return os.environ.get("STANCE_MODEL", DEFAULT_CLAUDE_MODEL)
+
+
+def impact_candidate_limit() -> int:
+    """Per-category cap on candidates one Impact detection pass judges (issue #18).
+
+    The ceiling on LLM judge calls a single detection makes; tunable via
+    IMPACT_CANDIDATE_LIMIT.
+    """
+    from .impacts import DEFAULT_CANDIDATE_LIMIT
+
+    return _positive_int("IMPACT_CANDIDATE_LIMIT", DEFAULT_CANDIDATE_LIMIT)
+
+
 def webapp_base_url() -> str:
     """Public base URL of the Web App, for Digest deep-links (ADR-0007).
 

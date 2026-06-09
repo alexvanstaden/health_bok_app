@@ -18,6 +18,8 @@ from .models import (
     FetchedAudio,
     FetchedTranscript,
     GroundedAnswer,
+    ImpactAnchor,
+    ImpactKnowledge,
     RetrievedEvidence,
     TranscriptSegment,
 )
@@ -175,5 +177,32 @@ class QueryAnswerer(Protocol):
         them against the retrieved Claims so a hallucinated id never becomes a
         Citation. An answer that cites nothing (and is not an explicit abstention)
         is treated as an abstention — cite-or-abstain has no third state.
+        """
+        ...
+
+
+@runtime_checkable
+class StanceJudge(Protocol):
+    """Judges the Stance of one knowledge↔anchor pair for change detection (issue #18).
+
+    The Part-2 seam for the Impact engine: candidate generation pairs a newly-
+    arrived Claim/Protocol with an existing anchor (a Decision, Goal, or Marker)
+    that shares a Concept with it, and this judge decides whether the knowledge
+    `reinforces`, `contradicts`, `refines`, or opens an `opportunity` against the
+    anchor — or is merely `unrelated`, in which case the engine raises nothing.
+
+    The LLM pass is what keeps the inbox honest: Concept overlap alone floods the
+    owner with the merely-related, so a stance is *judged*, not inferred from the
+    overlap (CONTEXT.md "Stance"). The Claude API in production; behind its own port
+    so the engine is driven in tests with a fake over *real* Concept-overlap
+    candidates from a real Postgres (PRD #1 testing decisions).
+    """
+
+    def judge(self, knowledge: ImpactKnowledge, anchor: ImpactAnchor) -> str:
+        """Return the Stance for this pair — one of `reinforces | contradicts |
+        refines | opportunity`, or `unrelated` to discard it.
+
+        An unrecognized return is treated as `unrelated` by the engine, so a sloppy
+        judgement can never mint an out-of-vocabulary Impact.
         """
         ...
