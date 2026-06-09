@@ -104,6 +104,26 @@ traversing shared Concepts. Unlike Claims, Concepts MAY be merged/normalized —
 their purpose.
 _Avoid_: tag, topic, keyword, entity
 
+## Natural-language Query
+
+The primary way the owner *explores* the Body of Knowledge now that visual graph
+exploration is out of v1 scope (ADR-0009, ADR-0011).
+
+**Answer**:
+A synthesized prose response to the owner's free-text question, grounded *strictly* in
+the owner's own Body of Knowledge (Claims, Protocols) and personal layer (Goals, Markers,
+Decisions) — never the model's general medical knowledge, never a blend. An Answer either
+cites the specific Claims it rests on or abstains ("nothing in your library covers this");
+there is no ungrounded prose. Retrieval reuses the existing pgvector + Concept-traversal
+machinery (ADR-0008), so query and the Impact engine share one path.
+_Avoid_: chat reply, completion, result, hit
+
+**Citation**:
+The link from an Answer back to a specific Claim it rests on — clickable through to that
+Claim's Source and locator (the timestamp deep-link for a video). Claims are the unit of
+citation; an Answer with no Citation is an abstention, never a guess.
+_Avoid_: footnote, reference (a Source is the reference; a Citation points at a Claim)
+
 ## Change Detection
 
 **Impact**:

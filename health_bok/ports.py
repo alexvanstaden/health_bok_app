@@ -17,6 +17,8 @@ from .models import (
     Extraction,
     FetchedAudio,
     FetchedTranscript,
+    GroundedAnswer,
+    RetrievedEvidence,
     TranscriptSegment,
 )
 
@@ -142,9 +144,36 @@ class Embedder(Protocol):
 
     OpenAI `text-embedding-3-small` in production. Behind its own seam so Concept
     normalization runs in tests against a `FakeEmbedder` emitting controlled
-    vectors over a real pgvector, asserting merge-vs-new at the threshold.
+    vectors over a real pgvector, asserting merge-vs-new at the threshold. The
+    same port embeds a free-text *question* for grounded query retrieval (issue
+    #17), so query and Concept normalization share one embedding path (ADR-0011).
     """
 
     def embed(self, text: str) -> list[float]:
         """Return the embedding of `text` — a list of 1536 floats."""
+        ...
+
+
+@runtime_checkable
+class QueryAnswerer(Protocol):
+    """Synthesizes a grounded, cited answer from retrieved evidence (ADR-0011).
+
+    The Part-2 seam for natural-language query (issue #17): given the owner's
+    question and the Claims/Protocols/personal-layer context retrieval gathered,
+    return a `GroundedAnswer` resting *only* on that evidence — citing the specific
+    Claims behind it, or abstaining when the evidence does not cover the question.
+    Strictly grounded and cite-or-abstain: never the model's own general medical
+    knowledge, never a blend (ADR-0011). The Claude API in production; behind its
+    own port so the query service is driven in tests with a fake over a *real*
+    Postgres retrieval (PRD #1 testing decisions).
+    """
+
+    def answer(self, question: str, evidence: RetrievedEvidence) -> GroundedAnswer:
+        """Answer `question` grounded in `evidence`, citing Claim ids — or abstain.
+
+        Returning citation ids the service did not retrieve is harmless: it filters
+        them against the retrieved Claims so a hallucinated id never becomes a
+        Citation. An answer that cites nothing (and is not an explicit abstention)
+        is treated as an abstention — cite-or-abstain has no third state.
+        """
         ...

@@ -258,3 +258,186 @@ class Digest:
     @property
     def is_empty(self) -> bool:
         return not self.items
+
+
+# -- Natural-language query: grounded, cited answers (issue #17, ADR-0011) ----
+#
+# The primary way the owner *explores* the Body of Knowledge now that a visual
+# graph is out of v1 scope (ADR-0009). Retrieval gathers the admitted evidence
+# (Claims, Protocols) and personal-layer context (Goals, Markers, Decisions) that
+# share a Concept with the owner's question; the `QueryAnswerer` port then
+# synthesizes an answer grounded *only* in that evidence, citing the specific
+# Claims behind it — or abstains. These types cross the port boundary, so they
+# live here (with the other port types), keeping `ports` free of the store and its
+# driver.
+
+
+@dataclass(frozen=True)
+class EvidenceClaim:
+    """An admitted Claim offered to the answerer as citable evidence (ADR-0011).
+
+    Carries everything a Citation needs — the Claim's id, its text and sub-kind,
+    and the locator `deep_link` back to the exact moment in its Source — so an
+    answer's citations are clickable through to Source + locator with no second
+    read. The referenced Concept names ride along so the answerer can see why the
+    Claim was retrieved.
+    """
+
+    id: int
+    text: str
+    type: str
+    deep_link: str
+    source_title: str
+    concepts: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EvidenceProtocol:
+    """An admitted Protocol offered as context for an *actionable* answer (ADR-0011).
+
+    Not itself a citation unit (citations are Claims, ADR-0011), but it tells the
+    answerer what the owner's creators *recommend* — the "options" a question like
+    "what are my options for lowering apoB" is asking for. Carries its structured
+    parameters and a locator deep-link like the Claim above.
+    """
+
+    id: int
+    action: str
+    dose: str | None
+    timing: str | None
+    frequency: str | None
+    duration: str | None
+    deep_link: str
+    source_title: str
+    concepts: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EvidenceGoal:
+    """A Goal whose Concepts overlap the question — personal-layer context so the
+    answer can speak to what the owner is trying to achieve (CONTEXT.md "Goal")."""
+
+    id: int
+    title: str
+    detail: str | None
+    concepts: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EvidenceMarker:
+    """The owner's latest reading for a referenced Concept — the personal-layer
+    context that makes an answer actionable ("given my last apoB reading").
+    `out_of_range` is derived from the stored reference range, mirroring the Marker
+    browser (CONTEXT.md "Marker"), never a stored flag.
+    """
+
+    concept: str
+    value: float
+    unit: str
+    reference_low: float | None
+    reference_high: float | None
+    measured_at: datetime
+
+    @property
+    def out_of_range(self) -> bool:
+        if self.reference_low is not None and self.value < self.reference_low:
+            return True
+        if self.reference_high is not None and self.value > self.reference_high:
+            return True
+        return False
+
+
+@dataclass(frozen=True)
+class EvidenceDecision:
+    """A Decision whose Concepts overlap the question — what the owner is *already
+    doing*, so an answer can account for it (CONTEXT.md "Decision")."""
+
+    id: int
+    action: str
+    dose: str | None
+    timing: str | None
+    frequency: str | None
+    duration: str | None
+    note: str | None
+    concepts: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RetrievedEvidence:
+    """Everything retrieval gathered for one question, handed to the answerer.
+
+    Spans both the Body of Knowledge (Claims, Protocols) and the personal layer
+    (Goals, Markers, Decisions), so an answer can be cited *and* actionable
+    (ADR-0011). Claims are the citation unit: `has_citable_evidence` is the
+    structural gate the query service abstains on — no admitted Claim covers the
+    question, so there is nothing to ground an answer in.
+    """
+
+    claims: list[EvidenceClaim] = field(default_factory=list)
+    protocols: list[EvidenceProtocol] = field(default_factory=list)
+    goals: list[EvidenceGoal] = field(default_factory=list)
+    markers: list[EvidenceMarker] = field(default_factory=list)
+    decisions: list[EvidenceDecision] = field(default_factory=list)
+
+    @property
+    def claim_ids(self) -> set[int]:
+        return {c.id for c in self.claims}
+
+    @property
+    def has_citable_evidence(self) -> bool:
+        """Whether any admitted Claim was retrieved — the basis an answer can cite."""
+        return bool(self.claims)
+
+    @property
+    def is_empty(self) -> bool:
+        return not (
+            self.claims or self.protocols or self.goals or self.markers or self.decisions
+        )
+
+
+@dataclass(frozen=True)
+class GroundedAnswer:
+    """What the `QueryAnswerer` port returns: prose grounded in the evidence plus
+    the ids of the Claims it cites — or `abstained` when the evidence does not
+    actually answer the question (ADR-0011).
+
+    The service resolves `cited_claim_ids` back to full Citations against the
+    retrieved evidence and enforces cite-or-abstain, so a hallucinated id can
+    never become a citation and a non-abstaining answer always rests on ≥1
+    admitted Claim.
+    """
+
+    text: str
+    cited_claim_ids: list[int] = field(default_factory=list)
+    abstained: bool = False
+
+
+@dataclass(frozen=True)
+class Citation:
+    """One Claim an Answer rests on, resolved from the retrieved evidence (ADR-0011).
+
+    Clickable through to its Source and locator (the timestamp deep-link for a
+    video), so the owner can verify every grounded sentence against the moment it
+    was asserted.
+    """
+
+    claim_id: int
+    text: str
+    type: str
+    deep_link: str
+    source_title: str
+
+
+@dataclass(frozen=True)
+class Answer:
+    """The grounded, cited answer the Web App shows (ADR-0011).
+
+    An Answer is *either* an abstention ("nothing in your library covers this",
+    `abstained=True`, no citations) *or* synthesized prose resting on ≥1 Citation —
+    never ungrounded prose. That cite-or-abstain invariant is enforced by the query
+    service, not trusted from the model.
+    """
+
+    text: str
+    citations: list[Citation] = field(default_factory=list)
+    abstained: bool = False

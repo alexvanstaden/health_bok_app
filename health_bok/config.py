@@ -126,6 +126,41 @@ def concept_merge_distance() -> float:
     return _float("CONCEPT_MERGE_DISTANCE", DEFAULT_MERGE_DISTANCE)
 
 
+def query_model() -> str:
+    """The Claude model used to synthesize grounded query answers (ADR-0011).
+
+    Defaults to the same Claude model as the rest of the pipeline; tunable via
+    QUERY_MODEL if grounded Q&A warrants a different one from extraction.
+    """
+    return os.environ.get("QUERY_MODEL", DEFAULT_CLAUDE_MODEL)
+
+
+def query_concept_limit() -> int:
+    """How many nearest Concepts a question retrieves through (issue #17)."""
+    from .query import DEFAULT_CONCEPT_LIMIT
+
+    return _positive_int("QUERY_CONCEPT_LIMIT", DEFAULT_CONCEPT_LIMIT)
+
+
+def query_max_distance() -> float:
+    """Cosine-distance cutoff beyond which a Concept does not cover a question.
+
+    The query honesty knob (ADR-0011): a question far from everything in the
+    library retrieves no Concept and the answer abstains. Tunable via
+    QUERY_MAX_DISTANCE.
+    """
+    from .query import DEFAULT_MAX_DISTANCE
+
+    return _float("QUERY_MAX_DISTANCE", DEFAULT_MAX_DISTANCE)
+
+
+def query_evidence_limit() -> int:
+    """Per-category cap on evidence handed to the answerer (issue #17)."""
+    from .query import DEFAULT_EVIDENCE_LIMIT
+
+    return _positive_int("QUERY_EVIDENCE_LIMIT", DEFAULT_EVIDENCE_LIMIT)
+
+
 def webapp_base_url() -> str:
     """Public base URL of the Web App, for Digest deep-links (ADR-0007).
 

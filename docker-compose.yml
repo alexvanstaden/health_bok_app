@@ -24,6 +24,11 @@ services:
   api:
     build: .
     command: ["uvicorn", "health_bok.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    # The API needs the LLM keys at request time: OPENAI_API_KEY to embed Concept
+    # mentions (personal-layer writes, issue #16) and the query question, and
+    # ANTHROPIC_API_KEY to synthesize grounded answers (query, issue #17). The
+    # `environment` block below still overrides DATABASE_URL to the compose db.
+    env_file: .env
     environment:
       DATABASE_URL: postgresql://health:${POSTGRES_PASSWORD:-health}@db:5432/health_bok
     depends_on:

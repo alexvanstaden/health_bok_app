@@ -418,3 +418,31 @@ export function unlinkDecision(id: number, targetType: string, targetId: number)
     { method: "DELETE" },
   );
 }
+
+// -- Natural-language query: grounded & cited (issue #17) -------------------
+// The primary way the owner *explores* the Body of Knowledge now that a visual
+// graph is out of v1 scope (ADR-0009, ADR-0011). A free-text question is answered
+// STRICTLY from the owner's own library — Claims, Protocols, and personal layer —
+// never the model's general knowledge. Every answer cites the specific Claims it
+// rests on, each clickable through to its Source and locator; when nothing covers
+// the question the assistant abstains rather than confabulating. Grounding and
+// cite-or-abstain are enforced server-side.
+
+export type Citation = {
+  claim_id: number;
+  text: string;
+  type: string;
+  deep_link: string; // back to the moment in the Source (watch?v=ID&t=NNNs)
+  source_title: string;
+};
+
+export type QueryAnswer = {
+  question: string;
+  answer: string;
+  abstained: boolean; // true ⇒ "nothing in your library covers this"
+  citations: Citation[]; // empty when abstained; ≥1 otherwise
+};
+
+export function askQuestion(question: string): Promise<QueryAnswer> {
+  return post("/api/query", { question });
+}
