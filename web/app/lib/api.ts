@@ -248,3 +248,173 @@ export function listConcepts(filter: {
 export function getConcept(id: number): Promise<BokConcept> {
   return json(`/api/concepts/${id}`);
 }
+
+// -- The personal layer (issue #16) -----------------------------------------
+// The owner-specific layer (CONTEXT.md "Personal Layer"): Goals, Markers,
+// Decisions, recorded through guided forms and linked to the evidence layer by
+// Concept overlap. A Marker reading is append-only (the API rejects an overwrite)
+// and "out of range" is derived server-side from the stored reference range. A
+// Decision carries its *own* actual parameters, distinct from the Protocol it
+// implements; the suggester returns Protocols/Claims/Goals it overlaps with by
+// Concept, which the owner confirms one at a time.
+
+export type GoalRef = { id: number; title: string };
+export type DecisionRef = { id: number; action: string };
+export type MarkerRef = {
+  id: number;
+  concept: string;
+  value: number;
+  unit: string;
+  measured_at: string;
+};
+
+export type Goal = {
+  id: number;
+  title: string;
+  detail: string | null;
+  concepts: ConceptRef[];
+  served_by: DecisionRef[]; // Decisions serving it; empty ⇒ an unmet Goal
+};
+
+export type MarkerReading = {
+  id: number;
+  concept: ConceptRef;
+  value: number;
+  unit: string;
+  reference_low: number | null;
+  reference_high: number | null;
+  measured_at: string;
+  out_of_range: boolean; // derived from the reference range, never stored
+};
+
+export type MarkerSeries = {
+  concept: ConceptRef;
+  unit: string;
+  reading_count: number;
+  latest: MarkerReading;
+  out_of_range: boolean;
+};
+
+export type Decision = {
+  id: number;
+  action: string;
+  dose: string | null;
+  timing: string | null;
+  frequency: string | null;
+  duration: string | null;
+  started_at: string;
+  ended_at: string | null;
+  note: string | null;
+  concepts: ConceptRef[];
+  implements: ProtocolRef[]; // Protocol(s) it implements (detail only)
+  serves: GoalRef[]; // Goal(s) it serves (detail only)
+  motivated_by: MarkerRef[]; // Marker reading(s) behind it (detail only)
+  supported_by: ClaimRef[]; // Claim(s) that support it (detail only)
+};
+
+export type SuggestedLink = {
+  target_type: "protocol" | "claim" | "goal";
+  target_id: number;
+  label: string;
+  shared_concepts: string[];
+};
+
+export type NewGoal = { title: string; detail: string | null; concepts: string[] };
+export type NewMarker = {
+  concept: string;
+  value: number;
+  unit: string;
+  reference_low: number | null;
+  reference_high: number | null;
+  measured_at: string;
+};
+export type NewDecision = {
+  action: string;
+  dose: string | null;
+  timing: string | null;
+  frequency: string | null;
+  duration: string | null;
+  started_at: string;
+  ended_at: string | null;
+  note: string | null;
+  concepts: string[];
+  implements_protocol_id: number | null;
+};
+
+function post<T>(path: string, body: unknown): Promise<T> {
+  return json(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function listGoals(): Promise<{ goals: Goal[] }> {
+  return json("/api/goals");
+}
+
+export function getGoal(id: number): Promise<Goal> {
+  return json(`/api/goals/${id}`);
+}
+
+export function createGoal(body: NewGoal): Promise<{ id: number }> {
+  return post("/api/goals", body);
+}
+
+export function deleteGoal(id: number) {
+  return json(`/api/goals/${id}`, { method: "DELETE" });
+}
+
+export function listMarkers(): Promise<{ markers: MarkerSeries[] }> {
+  return json("/api/markers");
+}
+
+export function getMarkerHistory(
+  conceptId: number,
+): Promise<{ concept_id: number; readings: MarkerReading[] }> {
+  return json(`/api/markers/${conceptId}`);
+}
+
+export function listMarkerReadings(): Promise<{ readings: MarkerReading[] }> {
+  return json("/api/marker-readings");
+}
+
+export function createMarker(body: NewMarker): Promise<{ id: number }> {
+  return post("/api/markers", body);
+}
+
+export function listDecisions(): Promise<{ decisions: Decision[] }> {
+  return json("/api/decisions");
+}
+
+export function getDecision(id: number): Promise<Decision> {
+  return json(`/api/decisions/${id}`);
+}
+
+export function createDecision(body: NewDecision): Promise<{ id: number }> {
+  return post("/api/decisions", body);
+}
+
+export function deleteDecision(id: number) {
+  return json(`/api/decisions/${id}`, { method: "DELETE" });
+}
+
+export function getDecisionSuggestions(
+  id: number,
+): Promise<{ suggestions: SuggestedLink[] }> {
+  return json(`/api/decisions/${id}/suggestions`);
+}
+
+export function linkDecision(
+  id: number,
+  link: { target_type: string; target_id: number },
+) {
+  return post(`/api/decisions/${id}/links`, link);
+}
+
+export function unlinkDecision(id: number, targetType: string, targetId: number) {
+  return json(
+    `/api/decisions/${id}/links?target_type=${targetType}&target_id=${targetId}`,
+    { method: "DELETE" },
+  );
+}

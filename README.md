@@ -16,9 +16,10 @@ The system is built in two parts:
   progress.* The self-hosted Web App is the primary interface: the owner approves
   Candidates, extraction draws Claims and Protocols into the Body of Knowledge, records
   the personal layer (Goals, Markers, Decisions), and queries it all in grounded, cited
-  natural language. Tracked in slices #13–18 — **slice 8 (issue #13), "Approve → Extract
-  → See Claims", and slice 9 (issue #14), "Browse & edit the Body of Knowledge", are now
-  built** (see below); the rest follow.
+  natural language. Tracked in slices #13–18 — **slices 8–11 are now built**: "Approve →
+  Extract → See Claims" (#13), "Browse & edit the Body of Knowledge" (#14), "Creator
+  management & backfill" (#15), and "the personal layer — Goals, Markers, Decisions"
+  (#16) (see below); grounded natural-language query and Impacts follow.
 
 ## Status
 
@@ -117,8 +118,48 @@ connections are followed by navigation. The owner can:
   Protocol `protected`, the hook a later re-extraction supersede pass reads so it never
   silently clobbers a hand-correction. (Re-extraction itself is a later slice.)
 
-The personal layer (Goals, Markers, Decisions) and grounded natural-language query are
-the remaining Part-2 slices (#15–18).
+**Slice 10 — Creator management & backfill in the Web App (issue #15).** The owner now
+manages the watch list and pulls in a Creator's back-catalogue entirely from the Web App —
+no CLI needed (ADR-0009). Add a Creator by @handle or channel URL (resolved once to a
+stable channel_id; an unresolvable one fails loudly inline), see each Creator's resolved
+name, **Backfill** its recent back-catalogue, or remove it. The **Backfill** tab is the
+back-catalogue review queue of metadata-only Candidates (thumbnail, title, description,
+date, link): **bulk-reject** obvious noise, or **Approve** one — approving runs the *same*
+pipeline as a daily Candidate, the worker **transcribing-if-needed** (captions, else
+Whisper) before extracting and admitting, since a backfill Candidate has no Transcript yet.
+
+**Slice 11 — the personal layer: Goals, Markers, Decisions (issue #16).** The owner-specific
+layer of what the owner *wants, measures, and does* (CONTEXT.md "Personal Layer"), recorded
+through guided forms and linked to the impersonal evidence layer by **Concept overlap**. The
+owner can:
+
+- **Record a Goal** — a stable intention or risk ("lower cardiovascular risk") and the
+  Concepts it concerns. A Goal no Decision serves is flagged **unmet**, and a Goal's detail
+  shows which Decisions serve it.
+- **Record a Marker reading** — value + unit + reference range + date, referencing a Concept.
+  Readings are **append-only dated snapshots, never overwritten** (the database rejects any
+  mutate), so each Concept's history is a true **time-series**, viewable as a series. **"Out
+  of range" is derived** from the stored reference range (one- or two-sided), never a stored
+  flag.
+- **Record a Decision** — a time-bound adoption carrying its **own actual parameters**
+  (the owner's dose/timing), distinct from the Protocol it implements, so **deviation is
+  first-class**. **"Adopt"** on a Protocol's detail page pre-fills a Decision and links the
+  Protocol it `implements`, inheriting its Concepts.
+- **Suggest-then-confirm linking** — the Web App suggests the Protocols, Claims, and Goals
+  relevant to a Decision **by Concept overlap** (reusing the Slice-8 Embedder/Concept
+  machinery), and the owner **confirms or rejects each one individually**. A Decision also
+  links the Goal(s) it serves and the Marker(s) that motivated it, so its **rationale** —
+  the supporting evidence and the Goals served — is reviewable in one place.
+
+Concept mentions on a Goal/Marker/Decision are normalized onto the **same** canonical
+Concepts the admit pipeline mints, so the personal layer and the Body of Knowledge share one
+Concept set and overlap is meaningful. New typed tables `goals`/`markers`/`decisions`; the
+`decision → protocol implements`, `decision → goal serves`, `decision → marker motivated_by`,
+and `claim → decision supports` relationships live in the one polymorphic `edges` table
+(ADR-0008).
+
+Grounded natural-language query and change-detection **Impacts** are the remaining Part-2
+slices (#17–18).
 
 ## Architecture
 
@@ -265,6 +306,13 @@ so there is no login screen). The flow:
    justifying Claims; everything that references a Concept), and **edit or delete**
    any Claim or Protocol in place. An edit is marked a *protected version* so a
    later re-extraction won't overwrite your correction (ADR-0005/0010).
+8. **Record the personal layer** from the top nav (issue #16): **Goals** (with the
+   Concepts they concern; unmet ones flagged), **Markers** (append-only dated
+   readings per Concept, with out-of-range derived and a per-Concept history series),
+   and **Decisions** (with your own actual parameters). On a **Protocol** open
+   *Adopt as a Decision* to pre-fill one and link the Protocol it implements; on a
+   **Decision** confirm or reject the Protocols, Claims, and Goals it overlaps with
+   by Concept, link the Markers that motivated it, and review its whole rationale.
 
 The worker and pipeline read the same `.env`; the worker needs the LLM keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) to extract and embed. The HTTP API can
@@ -381,6 +429,15 @@ and keeps them from resurfacing, and — the heart of the slice — approving a 
 Candidate with no Transcript so the worker transcribes-if-needed (captions *and* the
 caption-less Whisper path) before extracting and admitting, plus the failed-then-retry
 path proving the archived Transcript survives and isn't re-transcribed.
+
+Part 2 (issue #16): `test_personal_layer.py` drives the personal layer — starting from a
+genuinely admitted Candidate it asserts Goal/Marker/Decision CRUD; a Marker being
+append-only (the immutability trigger rejects an UPDATE *and* a DELETE) with out-of-range
+derived from one- and two-sided reference ranges and a viewable history series; a Decision
+carrying its own actual parameters distinct from the Protocol it adopts; and
+suggest-then-confirm links generated by Concept overlap (a relevant Protocol, Claim, and
+Goal), individually confirmable so a confirmed one drops from the next round, with the
+Decision's rationale (supporting Claims + served Goals + motivating Markers) reviewable.
 
 ```bash
 source .venv/bin/activate    # after: pip install -e ".[dev]"

@@ -164,3 +164,44 @@ input:focus, select:focus, textarea:focus {
 }
 .link-pill:hover { border-color: var(--accent); }
 .crumb { color: var(--muted); }
+
+/* -- Personal layer: Goals, Markers, Decisions (issue #16) ---------------- */
+
+/* "Adopt a Protocol" — an anchor styled as a button (it navigates to the
+   pre-filled new-Decision form). */
+.adopt {
+  font: inherit;
+  text-decoration: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #06122a;
+  font-weight: 600;
+}
+.adopt:hover { filter: brightness(1.05); }
+
+/* A suggest-then-confirm candidate row: label + why on the left, actions right. */
+.suggestion {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem;
+  margin: 0.5rem 0;
+}
+.suggestion .meta { color: var(--muted); font-size: 0.8rem; margin-top: 0.2rem; }
+
+/* The small ✕ that detaches a confirmed link, sitting inside a link-pill. */
+button.unlink {
+  padding: 0 0.35rem;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1;
+}
+button.unlink:hover { color: var(--red); }

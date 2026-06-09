@@ -114,6 +114,11 @@ export default function ProtocolDetail({ params }: { params: { id: string } }) {
                 </a>
               </p>
               <div className="row">
+                {/* Adopt → record a Decision pre-filled from this Protocol and
+                    linked as the one it implements (issue #16). */}
+                <a href={`/decisions/new?protocol=${id}`} className="adopt">
+                  Adopt as a Decision
+                </a>
                 <button onClick={() => setEditing(true)}>Edit</button>
                 <button className="danger" disabled={busy} onClick={remove}>
                   Delete
