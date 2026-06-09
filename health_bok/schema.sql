@@ -241,10 +241,15 @@ CREATE INDEX IF NOT EXISTS embeddings_by_owner ON embeddings (owner_type, owner_
 -- enqueues long work (extract → normalize → admit) and returns immediately, so a
 -- request never blocks. No Redis/Celery — "single Postgres" (ADR-0003) stays
 -- literally true. Drained with SELECT … FOR UPDATE SKIP LOCKED.
+-- `video_id` is YouTube's stable external id, deliberately *not* an FK to
+-- `videos`: a backfill Candidate (issue #15) is approved — enqueuing a job — while
+-- it is still metadata-only, before its Source is archived. The worker acquires
+-- the Transcript (transcribe-if-needed) when it drains the job, creating the
+-- `videos` row then. An FK here would forbid that ordering.
 CREATE TABLE IF NOT EXISTS jobs (
     id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     kind       TEXT        NOT NULL CHECK (kind IN ('admit')),
-    video_id   TEXT        NOT NULL REFERENCES videos (video_id),
+    video_id   TEXT        NOT NULL,
     state      TEXT        NOT NULL DEFAULT 'queued'
                            CHECK (state IN ('queued', 'running', 'done', 'failed')),
     attempts   INTEGER     NOT NULL DEFAULT 0,
@@ -253,6 +258,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS jobs_queued ON jobs (id) WHERE state = 'queued';
+-- Drop the FK on a database first created before issue #15 (idempotent).
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_video_id_fkey;
 
 -- The daily-Candidate admission lifecycle (CONTEXT.md "Candidate"; ADR-0004,
 -- ADR-0007, ADR-0010). A daily Candidate is a video already processed (transcript
@@ -264,9 +271,13 @@ CREATE INDEX IF NOT EXISTS jobs_queued ON jobs (id) WHERE state = 'queued';
 --   candidate → rejected                            (owner declines)
 --
 -- The absence of a row means a plain, un-acted-on `candidate`; a row records
--- where the owner's decision and the worker have taken it since.
+-- where the owner's decision and the worker have taken it since. The lifecycle is
+-- shared by daily and backfill Candidates (issue #15): keyed by the external
+-- video_id, *not* an FK to `videos`, so a backfill Candidate can be approved or
+-- rejected while still metadata-only — its `videos` row is created later, when the
+-- worker acquires the Transcript on approval.
 CREATE TABLE IF NOT EXISTS admissions (
-    video_id   TEXT        PRIMARY KEY REFERENCES videos (video_id),
+    video_id   TEXT        PRIMARY KEY,
     state      TEXT        NOT NULL
                            CHECK (state IN ('approved', 'processing',
                                             'admitted', 'failed', 'rejected')),
@@ -274,3 +285,5 @@ CREATE TABLE IF NOT EXISTS admissions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Drop the FK on a database first created before issue #15 (idempotent).
+ALTER TABLE admissions DROP CONSTRAINT IF EXISTS admissions_video_id_fkey;

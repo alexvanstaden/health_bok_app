@@ -20,7 +20,12 @@ from health_bok.models import (
 )
 from health_bok.repository import Repository
 from health_bok.worker import drain
-from tests.fakes import FakeEmbedder, FakeExtractor
+from tests.fakes import (
+    FakeContentSource,
+    FakeEmbedder,
+    FakeExtractor,
+    FakeTranscriber,
+)
 from tests.seed import seed_processed_video
 
 VIDEO_ID = "vid_zone2"
@@ -86,6 +91,19 @@ def normalizer(repo: Repository) -> ConceptNormalizer:
     )
 
 
+def drain_daily(extractor: FakeExtractor, repo: Repository) -> int:
+    """Drain as the worker does — a daily Candidate already has a Transcript, so the
+    ContentSource/Transcriber are wired but never touched (asserted in test_backfill_admission).
+    """
+    return drain(
+        content_source=FakeContentSource(),
+        transcriber=FakeTranscriber(),
+        extractor=extractor,
+        normalizer=normalizer(repo),
+        repo=repo,
+    )
+
+
 def test_approve_then_admit_builds_the_body_of_knowledge(conn):
     repo = Repository(conn)
     seed_processed_video(repo, video_id=VIDEO_ID)
@@ -98,7 +116,7 @@ def test_approve_then_admit_builds_the_body_of_knowledge(conn):
 
     # --- The worker drains the job: approved -> processing -> admitted. --------
     extractor = FakeExtractor(make_extraction())
-    handled = drain(extractor=extractor, normalizer=normalizer(repo), repo=repo)
+    handled = drain_daily(extractor, repo)
     assert handled == 1
     assert extractor.extracted == [VIDEO_ID]
     assert repo.admission_state(VIDEO_ID) == "admitted"
@@ -154,7 +172,7 @@ def test_failed_extraction_marks_candidate_failed_and_is_retryable(conn):
 
     # A raising Extractor drives the Candidate to `failed`, nothing half-admitted.
     boom = FakeExtractor(error=RuntimeError("model unavailable"))
-    drain(extractor=boom, normalizer=normalizer(repo), repo=repo)
+    drain_daily(boom, repo)
     assert repo.admission_state(VIDEO_ID) == "failed"
     assert _job_states(conn) == ["failed"]
     assert repo.admitted_claims(VIDEO_ID) == []
@@ -165,7 +183,7 @@ def test_failed_extraction_marks_candidate_failed_and_is_retryable(conn):
     # Retry re-enqueues; a working Extractor now admits it.
     assert review.retry_candidate(VIDEO_ID, repo=repo) is True
     assert repo.admission_state(VIDEO_ID) == "approved"
-    drain(extractor=FakeExtractor(make_extraction()), normalizer=normalizer(repo), repo=repo)
+    drain_daily(FakeExtractor(make_extraction()), repo)
     assert repo.admission_state(VIDEO_ID) == "admitted"
     assert len(repo.admitted_claims(VIDEO_ID)) == 3
 

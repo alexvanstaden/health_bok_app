@@ -151,9 +151,20 @@ def _cmd_worker(args: argparse.Namespace) -> int:
             merge_distance=config.concept_merge_distance(),
         )
         extractor = ClaudeExtractor(config.anthropic_api_key(), config.extraction_model())
+        # A backfill Candidate has no archived Transcript, so the worker acquires
+        # one transcribe-if-needed before extracting (issue #15): YouTube captions,
+        # else Whisper (reusing the same OpenAI key the embedder needs).
+        content_source = YouTubeContentSource()
+        transcriber = WhisperTranscriber(config.openai_api_key())
         logger.info("worker started (poll every %ss)", args.interval)
         while True:
-            handled = drain(extractor=extractor, normalizer=normalizer, repo=repo)
+            handled = drain(
+                content_source=content_source,
+                transcriber=transcriber,
+                extractor=extractor,
+                normalizer=normalizer,
+                repo=repo,
+            )
             if handled:
                 logger.info("worker drained %d job(s)", handled)
             if args.once:

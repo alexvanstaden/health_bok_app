@@ -25,8 +25,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import config, curation, review
+from . import config, creators, curation, review
+from .adapters.youtube import YouTubeContentSource
 from .db import connect, init_schema
+from .models import CreatorResolutionError
 from .repository import (
     BokClaim,
     BokConcept,
@@ -123,6 +125,123 @@ def retry(video_id: str) -> dict:
     if not retried:
         raise HTTPException(status_code=409, detail="not in a failed state")
     return {"video_id": video_id, "enqueued": True, "state": "approved"}
+
+
+# == Creator management & backfill (issue #15) =============================
+#
+# Maintain the watch list and pull in a Creator's back-catalogue from the Web App,
+# so the owner never needs the CLI to feed the pipeline (ADR-0009). Add reuses the
+# existing `resolve_creator` path (resolve once, persist the stable channel_id) and
+# seeds the recent back-catalogue as metadata-only Candidates; an explicit backfill
+# trigger re-runs that population on demand. Approving a backfill Candidate uses the
+# very same `/approve` endpoint as a daily one — the worker then transcribes-if-
+# needed before extracting (issue #15). Bulk-reject clears obvious noise in one go.
+
+
+class AddCreator(BaseModel):
+    """A reference to add to the watch list — an @handle, bare handle, or URL."""
+
+    reference: str
+
+
+class BulkReject(BaseModel):
+    """The backfill Candidate video_ids the owner is rejecting as noise."""
+
+    video_ids: list[str]
+
+
+@app.get("/api/creators")
+def list_creators() -> dict:
+    """The watch list: each Creator with its resolved channel name (issue #15)."""
+    with _repo() as repo:
+        watched = repo.list_creators()
+    return {
+        "creators": [
+            {"channel_id": c.channel_id, "name": c.name} for c in watched
+        ]
+    }
+
+
+@app.post("/api/creators")
+def add_creator(body: AddCreator) -> dict:
+    """Add a Creator by @handle or channel URL; an unresolvable one fails loudly.
+
+    Resolves the reference once via YouTube, persists the stable identity, and
+    seeds its recent back-catalogue as metadata-only Candidates (issue #7), all in
+    one transaction. A reference that names no reachable channel returns 422.
+    """
+    with _repo() as repo:
+        try:
+            identity = creators.add_creator(
+                body.reference,
+                content_source=YouTubeContentSource(),
+                repo=repo,
+                cutoff=config.backfill_cutoff(),
+            )
+        except CreatorResolutionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"channel_id": identity.channel_id, "name": identity.name}
+
+
+@app.delete("/api/creators/{channel_id}")
+def remove_creator(channel_id: str) -> dict:
+    """Remove a Creator from the watch list by its stable channel_id."""
+    with _repo() as repo:
+        removed = creators.remove_creator(channel_id, repo=repo)
+    if not removed:
+        raise HTTPException(status_code=404, detail="creator not found")
+    return {"channel_id": channel_id, "removed": True}
+
+
+@app.post("/api/creators/{channel_id}/backfill")
+def trigger_backfill(channel_id: str) -> dict:
+    """Trigger a backfill of a watched Creator's back-catalogue (issue #15).
+
+    Surfaces the Creator's recent back-catalogue as metadata-only Candidates;
+    idempotent, so it only tops up newly-seen uploads. 404 if the channel_id is
+    not on the watch list.
+    """
+    with _repo() as repo:
+        stored = creators.backfill_creator(
+            channel_id,
+            content_source=YouTubeContentSource(),
+            repo=repo,
+            cutoff=config.backfill_cutoff(),
+        )
+    if stored is None:
+        raise HTTPException(status_code=404, detail="creator not found")
+    return {"channel_id": channel_id, "stored": stored, "count": len(stored)}
+
+
+@app.get("/api/backfill")
+def list_backfill() -> dict:
+    """The backfill review queue: metadata-only Candidates awaiting a decision."""
+    with _repo() as repo:
+        candidates = repo.list_backfill_candidates()
+    return {
+        "candidates": [
+            {
+                "video_id": c.video_id,
+                "title": c.title,
+                "description": c.description,
+                "url": c.url,
+                "thumbnail_url": c.thumbnail_url,
+                "published_at": c.published_at.isoformat(),
+                "channel_id": c.channel_id,
+                "channel_name": c.channel_name,
+                "state": c.state,
+            }
+            for c in candidates
+        ]
+    }
+
+
+@app.post("/api/backfill/reject")
+def reject_backfill(body: BulkReject) -> dict:
+    """Bulk-reject obvious backfill noise; returns how many were rejected."""
+    with _repo() as repo:
+        rejected = review.bulk_reject(body.video_ids, repo=repo)
+    return {"rejected": rejected}
 
 
 @app.get("/api/videos/{video_id}/claims")

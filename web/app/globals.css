@@ -138,6 +138,19 @@ input:focus, select:focus, textarea:focus {
 .form label { display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); }
 .form .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
 
+/* -- Backfill review queue (issue #15) ------------------------------------ */
+
+.backfill-row { align-items: flex-start; flex-wrap: nowrap; gap: 0.8rem; }
+.backfill-meta { flex: 1; min-width: 0; }
+.thumb { flex: none; line-height: 0; }
+.thumb img {
+  width: 160px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
 .connections { margin: 1rem 0; }
 .connections h3 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
 .link-pill {

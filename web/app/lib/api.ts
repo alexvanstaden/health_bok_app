@@ -45,7 +45,13 @@ export type VideoKnowledge = {
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...init });
   if (!res.ok) {
-    throw new Error(`${init?.method ?? "GET"} ${path} failed: ${res.status}`);
+    // Surface the API's `detail` when present (e.g. an unresolvable Creator), so
+    // failures are loud and legible rather than a bare status code (issue #15).
+    const detail = await res
+      .json()
+      .then((b) => (b && typeof b.detail === "string" ? b.detail : null))
+      .catch(() => null);
+    throw new Error(detail ?? `${init?.method ?? "GET"} ${path} failed: ${res.status}`);
   }
   return res.json() as Promise<T>;
 }
@@ -68,6 +74,61 @@ export function retryCandidate(videoId: string) {
 
 export function getVideoKnowledge(videoId: string): Promise<VideoKnowledge> {
   return json(`/api/videos/${videoId}/claims`);
+}
+
+// -- Creator management & backfill (issue #15) ------------------------------
+// Maintain the watch list and pull in a Creator's back-catalogue from the Web
+// App, so the owner never needs the CLI to feed the pipeline (ADR-0009). Adding
+// reuses the resolve-once path and seeds recent Candidates; the explicit backfill
+// trigger re-pulls on demand. Approving a backfill Candidate reuses approveCandidate
+// — the worker then transcribes-if-needed before extracting.
+
+export type Creator = { channel_id: string; name: string };
+
+export type BackfillCandidate = {
+  video_id: string;
+  title: string;
+  description: string;
+  url: string;
+  thumbnail_url: string;
+  published_at: string;
+  channel_id: string;
+  channel_name: string;
+  state: string;
+};
+
+export function listCreators(): Promise<{ creators: Creator[] }> {
+  return json("/api/creators");
+}
+
+export function addCreator(reference: string): Promise<Creator> {
+  return json("/api/creators", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reference }),
+  });
+}
+
+export function removeCreator(channelId: string) {
+  return json(`/api/creators/${channelId}`, { method: "DELETE" });
+}
+
+export function triggerBackfill(
+  channelId: string,
+): Promise<{ channel_id: string; stored: string[]; count: number }> {
+  return json(`/api/creators/${channelId}/backfill`, { method: "POST" });
+}
+
+export function listBackfillCandidates(): Promise<{ candidates: BackfillCandidate[] }> {
+  return json("/api/backfill");
+}
+
+export function rejectBackfillCandidates(videoIds: string[]): Promise<{ rejected: number }> {
+  return json("/api/backfill/reject", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ video_ids: videoIds }),
+  });
 }
 
 // -- The Body of Knowledge browser (issue #14) ------------------------------
