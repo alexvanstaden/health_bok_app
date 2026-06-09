@@ -22,6 +22,8 @@ from .models import (
     EvidenceMarker,
     EvidenceProtocol,
     FetchedTranscript,
+    ImpactAnchor,
+    ImpactKnowledge,
     Provenance,
     RetrievedEvidence,
     TranscriptSegment,
@@ -486,6 +488,100 @@ def _row_to_marker_reading(r) -> MarkerReading:
         reference_low=float(r[5]) if r[5] is not None else None,
         reference_high=float(r[6]) if r[6] is not None else None,
         measured_at=r[7],
+    )
+
+
+# -- Impact engine shapes & renderings (issue #18) --------------------------
+#
+# The Impact engine weighs newly-arrived knowledge against owner anchors. A
+# Claim/Protocol and a Decision/Goal/Marker each get a one-line `text` rendering
+# for the `StanceJudge` to reason over; the inbox `Impact` carries both ends'
+# labels so the Web App can render "new evidence <stance> your Decision X".
+
+
+def _params_text(dose, timing, frequency, duration) -> str:
+    """The structured parameters of a Protocol/Decision as a compact suffix."""
+    params = ", ".join(v for v in (dose, timing, frequency, duration) if v)
+    return f" ({params})" if params else ""
+
+
+def _out_of_range(value, low, high) -> bool:
+    if low is not None and value < low:
+        return True
+    if high is not None and value > high:
+        return True
+    return False
+
+
+def _marker_label(name: str, value, unit: str, low, high) -> str:
+    """A Marker reading rendered for an anchor: "apoB: 130 mg/dL (out of range)"."""
+    flag = " (out of range)" if _out_of_range(value, low, high) else ""
+    return f"{name}: {value} {unit}{flag}"
+
+
+@dataclass(frozen=True)
+class Impact:
+    """A persisted Impact for the inbox (CONTEXT.md "Impact"; issue #18).
+
+    Carries a readable label for both ends — the `source` Claim/Protocol that
+    triggered it and the `anchor` Decision/Goal/Marker it bears on — so the inbox
+    needs no second read to render the finding. `state` is the lifecycle position
+    (`new → reviewed → actioned | dismissed`); `actioned_decision_id` records the
+    Decision an `actioned` Impact produced (CONTEXT.md), or ``None``.
+    """
+
+    id: int
+    source_type: str
+    source_id: int
+    source_label: str
+    anchor_type: str
+    anchor_id: int
+    anchor_label: str
+    stance: str
+    state: str
+    detail: str | None
+    actioned_decision_id: int | None
+    created_at: datetime
+
+
+# The inbox projection: an Impact with both polymorphic ends' labels resolved by
+# LEFT JOINs (only the matching side is non-NULL). The marker label is built in the
+# mapper from its parts, so the SQL stays free of numeric string-building.
+_IMPACT_SELECT = (
+    "SELECT i.id, i.source_type, i.source_id, scl.text, sp.action, "
+    "       i.anchor_type, i.anchor_id, ad.action, ag.title, "
+    "       ac.name, am.value, am.unit, am.reference_low, am.reference_high, "
+    "       i.stance, i.state, i.detail, i.actioned_decision_id, i.created_at "
+    "FROM impacts i "
+    "LEFT JOIN claims scl ON i.source_type = 'claim' AND scl.id = i.source_id "
+    "LEFT JOIN protocols sp ON i.source_type = 'protocol' AND sp.id = i.source_id "
+    "LEFT JOIN decisions ad ON i.anchor_type = 'decision' AND ad.id = i.anchor_id "
+    "LEFT JOIN goals ag ON i.anchor_type = 'goal' AND ag.id = i.anchor_id "
+    "LEFT JOIN markers am ON i.anchor_type = 'marker' AND am.id = i.anchor_id "
+    "LEFT JOIN concepts ac ON i.anchor_type = 'marker' AND ac.id = am.concept_id"
+)
+
+
+def _row_to_impact(r) -> Impact:
+    if r[5] == "decision":
+        anchor_label = r[7]
+    elif r[5] == "goal":
+        anchor_label = r[8]
+    else:  # marker
+        anchor_label = _marker_label(r[9], r[10], r[11], r[12], r[13])
+    return Impact(
+        id=r[0],
+        source_type=r[1],
+        source_id=r[2],
+        source_label=r[3] if r[1] == "claim" else r[4],
+        anchor_type=r[5],
+        anchor_id=r[6],
+        anchor_label=anchor_label,
+        stance=r[14],
+        state=r[15],
+        detail=r[16],
+        actioned_decision_id=r[17],
+        created_at=r[18],
     )
 
 
@@ -1537,6 +1633,11 @@ class Repository:
                 "DELETE FROM embeddings WHERE owner_type = 'claim' AND owner_id = %s",
                 (claim_id,),
             )
+            # A Claim is only ever an Impact's source; clear any so none dangle.
+            cur.execute(
+                "DELETE FROM impacts WHERE source_type = 'claim' AND source_id = %s",
+                (claim_id,),
+            )
             cur.execute("DELETE FROM claims WHERE id = %s", (claim_id,))
             return cur.rowcount > 0
 
@@ -1555,6 +1656,11 @@ class Repository:
             )
             cur.execute(
                 "DELETE FROM embeddings WHERE owner_type = 'protocol' AND owner_id = %s",
+                (protocol_id,),
+            )
+            # A Protocol is only ever an Impact's source; clear any so none dangle.
+            cur.execute(
+                "DELETE FROM impacts WHERE source_type = 'protocol' AND source_id = %s",
                 (protocol_id,),
             )
             cur.execute("DELETE FROM protocols WHERE id = %s", (protocol_id,))
@@ -1604,6 +1710,11 @@ class Repository:
                 "DELETE FROM edges WHERE (src_type = 'goal' AND src_id = %(id)s) "
                 "OR (dst_type = 'goal' AND dst_id = %(id)s)",
                 {"id": goal_id},
+            )
+            # A Goal is only ever an Impact's anchor; clear any so none dangle.
+            cur.execute(
+                "DELETE FROM impacts WHERE anchor_type = 'goal' AND anchor_id = %s",
+                (goal_id,),
             )
             cur.execute("DELETE FROM goals WHERE id = %s", (goal_id,))
             return cur.rowcount > 0
@@ -1786,6 +1897,13 @@ class Repository:
                 "OR (dst_type = 'decision' AND dst_id = %(id)s)",
                 {"id": decision_id},
             )
+            # A Decision is only ever an Impact's anchor; clear any so none dangle.
+            # An Impact this Decision *actioned* keeps its row (its FK is ON DELETE
+            # SET NULL), so the audit trail of what the owner saw survives.
+            cur.execute(
+                "DELETE FROM impacts WHERE anchor_type = 'decision' AND anchor_id = %s",
+                (decision_id,),
+            )
             cur.execute("DELETE FROM decisions WHERE id = %s", (decision_id,))
             return cur.rowcount > 0
 
@@ -1875,6 +1993,321 @@ class Repository:
                 (src_type, src_id, dst_type, dst_id, kind),
             )
             return cur.rowcount > 0
+
+    # == Impact engine: candidates, persistence, inbox & lifecycle (issue #18) =
+    #
+    # Change detection reuses the Concept-traversal machinery query is built on
+    # (ADR-0008, ADR-0011): candidate pairs share a Concept; the `StanceJudge` (in
+    # the `impacts` service) then weighs each. These reads gather candidates and load
+    # the subject's rendering for the judge; the writes persist a deduped Impact and
+    # drive its lifecycle. As elsewhere the writes don't commit — the caller owns the
+    # transaction.
+
+    # -- candidate generation (reads) ----------------------------------------
+
+    def load_impact_knowledge(
+        self, source_type: str, source_id: int
+    ) -> ImpactKnowledge | None:
+        """Load a Claim/Protocol as the `knowledge` end of a judgement (issue #18).
+
+        Used for the *forward* pass — a newly-admitted Claim/Protocol is the subject
+        weighed against each candidate anchor — so it carries the entity's full
+        referenced Concepts and a one-line rendering. ``None`` if it's gone.
+        """
+        with self._conn.cursor() as cur:
+            if source_type == "claim":
+                cur.execute(
+                    "SELECT cl.text, " + _concept_refs_sql("claim", "cl.id") + " "
+                    "FROM claims cl WHERE cl.id = %s",
+                    (source_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                text = row[0]
+                concepts = [c["name"] for c in row[1]]
+            elif source_type == "protocol":
+                cur.execute(
+                    "SELECT p.action, p.dose, p.timing, p.frequency, p.duration, "
+                    + _concept_refs_sql("protocol", "p.id") + " "
+                    "FROM protocols p WHERE p.id = %s",
+                    (source_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                text = row[0] + _params_text(row[1], row[2], row[3], row[4])
+                concepts = [c["name"] for c in row[5]]
+            else:
+                raise ValueError(f"impact knowledge cannot be a {source_type!r}")
+        return ImpactKnowledge(
+            type=source_type, id=source_id, text=text, concepts=concepts
+        )
+
+    def load_impact_anchor(
+        self, anchor_type: str, anchor_id: int
+    ) -> ImpactAnchor | None:
+        """Load a Decision/Goal as the `anchor` end of a judgement (issue #18).
+
+        Used for the *reverse* pass — a newly-recorded Decision/Goal is the subject
+        scanned against the existing Body of Knowledge — so it carries its full
+        referenced Concepts and a one-line rendering. ``None`` if it's gone. (A
+        Marker is never the reverse subject — recording a reading doesn't trigger a
+        scan — so only Decision/Goal are loaded here.)
+        """
+        with self._conn.cursor() as cur:
+            if anchor_type == "decision":
+                cur.execute(
+                    "SELECT d.action, d.dose, d.timing, d.frequency, d.duration, "
+                    + _concept_refs_sql("decision", "d.id") + " "
+                    "FROM decisions d WHERE d.id = %s",
+                    (anchor_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                text = row[0] + _params_text(row[1], row[2], row[3], row[4])
+                concepts = [c["name"] for c in row[5]]
+            elif anchor_type == "goal":
+                cur.execute(
+                    "SELECT g.title, g.detail, " + _concept_refs_sql("goal", "g.id") + " "
+                    "FROM goals g WHERE g.id = %s",
+                    (anchor_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                text = row[0] + (f": {row[1]}" if row[1] else "")
+                concepts = [c["name"] for c in row[2]]
+            else:
+                raise ValueError(f"impact anchor cannot be a {anchor_type!r} here")
+        return ImpactAnchor(type=anchor_type, id=anchor_id, text=text, concepts=concepts)
+
+    def impact_anchor_candidates(
+        self, source_type: str, source_id: int, *, limit: int
+    ) -> list[ImpactAnchor]:
+        """Anchors sharing a Concept with a Claim/Protocol — the *forward* candidates.
+
+        The Decisions, Goals, and latest-per-Concept Marker readings that reference a
+        Concept the source also references (issue #18): the shared-Concept overlap
+        the `StanceJudge` then weighs. Each anchor carries the overlapping Concept
+        names. Capped per category at `limit` so a burst can't unbounded the judge.
+        """
+        concept_ids = self.concept_ids_for(source_type, source_id)
+        if not concept_ids:
+            return []
+        anchors: list[ImpactAnchor] = []
+        with self._conn.cursor() as cur:
+            for node_type, table, label_col in (
+                ("decision", "decisions", "action"),
+                ("goal", "goals", "title"),
+            ):
+                cur.execute(
+                    f"SELECT n.id, n.{label_col}, "
+                    "array_agg(DISTINCT c.name ORDER BY c.name) "
+                    f"FROM edges e JOIN {table} n ON n.id = e.src_id "
+                    "JOIN concepts c ON c.id = e.dst_id "
+                    f"WHERE e.src_type = %s AND e.dst_type = 'concept' "
+                    "AND e.kind = 'references' AND e.dst_id = ANY(%s) "
+                    f"GROUP BY n.id, n.{label_col} "
+                    "ORDER BY count(DISTINCT e.dst_id) DESC, n.id LIMIT %s",
+                    (node_type, concept_ids, limit),
+                )
+                anchors.extend(
+                    ImpactAnchor(
+                        type=node_type, id=r[0], text=r[1], concepts=list(r[2])
+                    )
+                    for r in cur.fetchall()
+                )
+            # Markers reference their Concept by FK, not an edge (ADR-0008): match
+            # the latest reading per overlapping Concept directly.
+            cur.execute(
+                "WITH latest AS ("
+                "  SELECT DISTINCT ON (concept_id) id, concept_id, value, unit, "
+                "         reference_low, reference_high "
+                "  FROM markers WHERE concept_id = ANY(%s) "
+                "  ORDER BY concept_id, measured_at DESC, id DESC) "
+                "SELECT l.id, c.name, l.value, l.unit, l.reference_low, "
+                "       l.reference_high "
+                "FROM latest l JOIN concepts c ON c.id = l.concept_id "
+                "ORDER BY c.name LIMIT %s",
+                (concept_ids, limit),
+            )
+            anchors.extend(
+                ImpactAnchor(
+                    type="marker",
+                    id=r[0],
+                    text=_marker_label(r[1], r[2], r[3], r[4], r[5]),
+                    concepts=[r[1]],
+                )
+                for r in cur.fetchall()
+            )
+        return anchors
+
+    def impact_knowledge_candidates(
+        self, anchor_type: str, anchor_id: int, *, limit: int
+    ) -> list[ImpactKnowledge]:
+        """Claims/Protocols sharing a Concept with a Decision/Goal — *reverse* candidates.
+
+        The Body-of-Knowledge entities a newly-recorded anchor should be scanned
+        against (issue #18): those referencing a Concept the anchor also references.
+        Each carries the overlapping Concept names; capped per category at `limit`.
+        """
+        concept_ids = self.concept_ids_for(anchor_type, anchor_id)
+        if not concept_ids:
+            return []
+        knowledge: list[ImpactKnowledge] = []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT cl.id, cl.text, "
+                "array_agg(DISTINCT c.name ORDER BY c.name) "
+                "FROM edges e JOIN claims cl ON cl.id = e.src_id "
+                "JOIN concepts c ON c.id = e.dst_id "
+                "WHERE e.src_type = 'claim' AND e.dst_type = 'concept' "
+                "AND e.kind = 'references' AND e.dst_id = ANY(%s) "
+                "GROUP BY cl.id ORDER BY count(DISTINCT e.dst_id) DESC, cl.id LIMIT %s",
+                (concept_ids, limit),
+            )
+            knowledge.extend(
+                ImpactKnowledge(type="claim", id=r[0], text=r[1], concepts=list(r[2]))
+                for r in cur.fetchall()
+            )
+            cur.execute(
+                "SELECT p.id, p.action, p.dose, p.timing, p.frequency, p.duration, "
+                "array_agg(DISTINCT c.name ORDER BY c.name) "
+                "FROM edges e JOIN protocols p ON p.id = e.src_id "
+                "JOIN concepts c ON c.id = e.dst_id "
+                "WHERE e.src_type = 'protocol' AND e.dst_type = 'concept' "
+                "AND e.kind = 'references' AND e.dst_id = ANY(%s) "
+                "GROUP BY p.id ORDER BY count(DISTINCT e.dst_id) DESC, p.id LIMIT %s",
+                (concept_ids, limit),
+            )
+            knowledge.extend(
+                ImpactKnowledge(
+                    type="protocol",
+                    id=r[0],
+                    text=r[1] + _params_text(r[2], r[3], r[4], r[5]),
+                    concepts=list(r[6]),
+                )
+                for r in cur.fetchall()
+            )
+        return knowledge
+
+    def decisions_supported_by_claim(self, claim_id: int) -> list[int]:
+        """The Decisions a Claim `supports` (ADR-0008) — the supersede anchors.
+
+        When a re-extraction can no longer match a superseded Claim, the Impact
+        engine raises an Impact against each Decision it supported (ADR-0005), so
+        changed evidence under a Decision is surfaced, not silently broken.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT dst_id FROM edges WHERE src_type = 'claim' AND src_id = %s "
+                "AND dst_type = 'decision' AND kind = 'supports' ORDER BY dst_id",
+                (claim_id,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    # -- persistence, inbox & lifecycle (writes/reads) -----------------------
+
+    def add_impact(
+        self,
+        source_type: str,
+        source_id: int,
+        anchor_type: str,
+        anchor_id: int,
+        stance: str,
+        *,
+        detail: str | None = None,
+    ) -> int | None:
+        """Persist a deduped Impact; ``None`` if the same finding already exists.
+
+        The unique constraint `(anchor, source, stance)` makes a re-run or an
+        overlapping piece of evidence raise nothing the second time — and a resolved
+        Impact's surviving row keeps it from re-nagging (issue #18). Does not commit.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO impacts (source_type, source_id, anchor_type, anchor_id, "
+                "stance, detail) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (anchor_type, anchor_id, source_type, source_id, stance) "
+                "DO NOTHING RETURNING id",
+                (source_type, source_id, anchor_type, anchor_id, stance, detail),
+            )
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def list_impacts(
+        self,
+        *,
+        stance: str | None = None,
+        anchor_type: str | None = None,
+        anchor_id: int | None = None,
+        states: list[str] | None = None,
+    ) -> list[Impact]:
+        """The Impact inbox, newest first — filterable by stance, anchor, and state.
+
+        `states` narrows to a lifecycle subset (the default inbox passes the
+        unresolved `new`/`reviewed`); `anchor_type`/`anchor_id` filter to one
+        anchor; `stance` to one stance (issue #18). Each Impact carries both ends'
+        labels resolved.
+        """
+        where: list[str] = []
+        params: dict = {}
+        if stance is not None:
+            where.append("i.stance = %(stance)s")
+            params["stance"] = stance
+        if anchor_type is not None:
+            where.append("i.anchor_type = %(anchor_type)s")
+            params["anchor_type"] = anchor_type
+        if anchor_id is not None:
+            where.append("i.anchor_id = %(anchor_id)s")
+            params["anchor_id"] = anchor_id
+        if states:
+            where.append("i.state = ANY(%(states)s)")
+            params["states"] = list(states)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                _IMPACT_SELECT + clause + " ORDER BY i.created_at DESC, i.id DESC",
+                params,
+            )
+            return [_row_to_impact(r) for r in cur.fetchall()]
+
+    def get_impact(self, impact_id: int) -> Impact | None:
+        """One Impact with both ends' labels, or ``None`` if it's gone."""
+        with self._conn.cursor() as cur:
+            cur.execute(_IMPACT_SELECT + " WHERE i.id = %s", (impact_id,))
+            row = cur.fetchone()
+        return _row_to_impact(row) if row is not None else None
+
+    def set_impact_state(
+        self, impact_id: int, state: str, *, actioned_decision_id: int | None = None
+    ) -> bool:
+        """Move one Impact along its lifecycle (issue #18). ``False`` if it's gone.
+
+        `actioned_decision_id` records the Decision an `actioned` Impact produced;
+        passing ``None`` leaves any existing link untouched.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE impacts SET state = %s, updated_at = now(), "
+                "actioned_decision_id = COALESCE(%s, actioned_decision_id) "
+                "WHERE id = %s",
+                (state, actioned_decision_id, impact_id),
+            )
+            return cur.rowcount > 0
+
+    def bulk_set_impact_state(self, impact_ids: list[int], state: str) -> int:
+        """Move many Impacts to `state` at once; returns how many changed (issue #18)."""
+        if not impact_ids:
+            return 0
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE impacts SET state = %s, updated_at = now() WHERE id = ANY(%s)",
+                (state, impact_ids),
+            )
+            return cur.rowcount
 
     # -- helpers -------------------------------------------------------------
 

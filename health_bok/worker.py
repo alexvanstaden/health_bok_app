@@ -25,7 +25,8 @@ from datetime import datetime, timezone
 from .acquire import acquire_transcript
 from .admit import admit_candidate
 from .concepts import ConceptNormalizer
-from .ports import ContentSource, Extractor, Transcriber
+from .impacts import detect_for_admitted_video
+from .ports import ContentSource, Extractor, StanceJudge, Transcriber
 from .repository import Repository
 
 logger = logging.getLogger("health_bok.worker")
@@ -42,6 +43,7 @@ def process_next_job(
     extractor: Extractor,
     normalizer: ConceptNormalizer,
     repo: Repository,
+    judge: StanceJudge | None = None,
 ) -> bool:
     """Claim and run the next queued job. Returns ``False`` when none is queued.
 
@@ -53,6 +55,12 @@ def process_next_job(
     transaction: on success the job is `done`; on failure everything admission
     wrote is rolled back and the Candidate is driven to `failed` with the error
     recorded — never half-admitted, and the archived Transcript survives for retry.
+
+    Once admission has committed, the Impact engine runs the *forward* pass over the
+    just-admitted Claims/Protocols (issue #18) — but only if a `StanceJudge` is
+    wired, and failure-isolated in its own step, so a judge hiccup never undoes a
+    durable admission (ADR-0005). The daily-pipeline tests that don't exercise
+    change detection leave `judge` unset, and detection is simply skipped.
     """
     job = repo.claim_next_job()
     if job is None:
@@ -79,7 +87,28 @@ def process_next_job(
         repo.mark_job_failed(job.id, error=str(exc))
         repo.commit()
         logger.warning("admission failed for %s: %s", job.video_id, exc)
+        return True
+
+    _detect_impacts(job.video_id, judge=judge, repo=repo)
     return True
+
+
+def _detect_impacts(
+    video_id: str, *, judge: StanceJudge | None, repo: Repository
+) -> None:
+    """Run the forward Impact pass over a just-admitted video, failure-isolated.
+
+    Detection runs *after* admission has committed, so a `StanceJudge` failure costs
+    only the change-detection step — the Claims are durably admitted and the job is
+    already `done` (ADR-0005). Skipped when no judge is configured.
+    """
+    if judge is None:
+        return
+    try:
+        detect_for_admitted_video(video_id, judge=judge, repo=repo)
+    except Exception as exc:
+        repo.rollback()
+        logger.warning("impact detection failed for %s: %s", video_id, exc)
 
 
 def _ensure_transcript_archived(
@@ -114,6 +143,7 @@ def drain(
     extractor: Extractor,
     normalizer: ConceptNormalizer,
     repo: Repository,
+    judge: StanceJudge | None = None,
 ) -> int:
     """Process every currently-queued job; return how many were handled."""
     handled = 0
@@ -123,6 +153,7 @@ def drain(
         extractor=extractor,
         normalizer=normalizer,
         repo=repo,
+        judge=judge,
     ):
         handled += 1
     return handled
