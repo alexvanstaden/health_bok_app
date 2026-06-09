@@ -193,6 +193,9 @@ BEGIN
         WHEN 'claim'    THEN 'claims'
         WHEN 'protocol' THEN 'protocols'
         WHEN 'concept'  THEN 'concepts'
+        WHEN 'goal'     THEN 'goals'
+        WHEN 'marker'   THEN 'markers'
+        WHEN 'decision' THEN 'decisions'
         ELSE NULL
     END;
     IF tbl IS NULL THEN
@@ -287,3 +290,93 @@ CREATE TABLE IF NOT EXISTS admissions (
 );
 -- Drop the FK on a database first created before issue #15 (idempotent).
 ALTER TABLE admissions DROP CONSTRAINT IF EXISTS admissions_video_id_fkey;
+
+
+-- ===========================================================================
+-- Slice 11: the personal layer (issue #16, PRD #12).
+--
+-- The owner-specific layer of what the owner wants, measures, and does
+-- (CONTEXT.md "Personal Layer"): Goals, Markers, Decisions. Each is a typed
+-- entity table (ADR-0008); the Concepts each one concerns/references are recorded
+-- as `references` edges (a Marker's single Concept is 1:many *ownership*, so it is
+-- an FK column, not an edge — ADR-0008), and a Decision's structural links to the
+-- Protocol it implements, the Goal(s) it serves, and the Marker(s) that motivated
+-- it all live in the one polymorphic `edges` table. No new edge `kind`s are needed
+-- — `references`/`supports`/`implements`/`serves`/`motivated_by` were reserved when
+-- `edges` was first created; the integrity trigger above is extended to know the
+-- three new node types.
+-- ===========================================================================
+
+-- A Goal: a stable personal intention or risk the owner wants to address
+-- (CONTEXT.md "Goal") — "improve sleep", "lower cardiovascular risk". The
+-- Concepts it concerns are `goal -> concept references` edges, so a Goal and a
+-- Decision can be found relevant to each other by shared Concept. An *unmet* Goal
+-- — one no Decision `serves` — is visible by the absence of an inbound `serves`
+-- edge, not a stored flag.
+CREATE TABLE IF NOT EXISTS goals (
+    id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    title      TEXT        NOT NULL,
+    detail     TEXT,                                       -- optional elaboration
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A Marker reading: an objective, quantitative, dated snapshot the owner records,
+-- referencing exactly one Concept (apoB, hsCRP, fasting glucose…) (CONTEXT.md
+-- "Marker"). Strictly a time-series — every reading is a new row, never an
+-- overwrite (the immutability trigger below enforces it), so a Concept's whole
+-- history is the rows sharing its `concept_id` ordered by `measured_at`. The
+-- reference range is stored (either or both bounds may be absent for a one-sided
+-- range like "< 1.0"); "out of range" is *derived* from it on read, never a stored
+-- flag. The Concept is 1:many ownership, so it is an FK column, not an edge
+-- (ADR-0008). `value` is NUMERIC so series math and range comparison stay exact.
+CREATE TABLE IF NOT EXISTS markers (
+    id              BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    concept_id      BIGINT      NOT NULL REFERENCES concepts (id),
+    value           NUMERIC     NOT NULL,
+    unit            TEXT        NOT NULL,
+    reference_low   NUMERIC,                               -- lower bound, if any
+    reference_high  NUMERIC,                               -- upper bound, if any
+    measured_at     TIMESTAMPTZ NOT NULL,                  -- the reading's date
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS markers_series ON markers (concept_id, measured_at);
+
+-- A Marker reading is an immutable dated snapshot (CONTEXT.md "Marker"): once
+-- recorded it is never overwritten or removed, so the time-series stays a faithful
+-- audit of what was measured when. Enforced at the database with the same fail-loud
+-- pattern transcript immutability (ADR-0001) uses; a correction is a *new* reading.
+CREATE OR REPLACE FUNCTION markers_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'markers are append-only dated snapshots (issue #16): % blocked', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS markers_no_mutate ON markers;
+CREATE TRIGGER markers_no_mutate
+    BEFORE UPDATE OR DELETE ON markers
+    FOR EACH ROW EXECUTE FUNCTION markers_immutable();
+
+-- A Decision: the owner's time-bound adoption of an intervention (CONTEXT.md
+-- "Decision") — the only entity carrying the personal "why". It implements a
+-- Protocol (sometimes only partially), so it holds its *own actual* parameters
+-- (the owner's dose/timing/frequency/duration) distinct from the Protocol's, which
+-- makes deviation from the Protocol first-class. The structural links are edges:
+-- `decision -> protocol implements`, `decision -> goal serves`,
+-- `decision -> marker motivated_by`, plus `decision -> concept references` (so the
+-- Concept-overlap suggester can find relevant Protocols/Claims/Goals) and inbound
+-- `claim -> decision supports` for confirmed supporting evidence. No structure
+-- CHECK (unlike Protocols): a Decision may be adopted before its parameters are
+-- pinned down.
+CREATE TABLE IF NOT EXISTS decisions (
+    id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    action     TEXT        NOT NULL,                       -- the intervention adopted
+    dose       TEXT,
+    timing     TEXT,
+    frequency  TEXT,
+    duration   TEXT,
+    started_at TIMESTAMPTZ NOT NULL,                       -- when the owner adopted it
+    ended_at   TIMESTAMPTZ,                                -- when stopped, if it has
+    note       TEXT,                                       -- the owner's rationale prose
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

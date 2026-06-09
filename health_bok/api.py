@@ -18,6 +18,7 @@ entrypoint — never by the domain or the test suite.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Iterator
 
 import psycopg
@@ -25,15 +26,23 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import config, creators, curation, review
+from . import config, creators, curation, personal, review
+from .adapters.embedder import OpenAIEmbedder
 from .adapters.youtube import YouTubeContentSource
+from .concepts import ConceptNormalizer
 from .db import connect, init_schema
 from .models import CreatorResolutionError
+from .personal import UnknownLinkTarget
 from .repository import (
     BokClaim,
     BokConcept,
     BokProtocol,
+    Decision,
+    Goal,
+    MarkerReading,
+    MarkerSeries,
     Repository,
+    SuggestedLink,
 )
 
 app = FastAPI(title="Health & Longevity Knowledge — Web App API")
@@ -72,6 +81,21 @@ def _repo() -> Iterator[Repository]:
         yield Repository(conn)
     finally:
         conn.close()
+
+
+def _normalizer(repo: Repository) -> ConceptNormalizer:
+    """A ConceptNormalizer wired to the real OpenAI Embedder (ADR-0008).
+
+    Recording a Goal/Marker/Decision resolves its Concept mentions onto the *same*
+    canonical Concepts the admit pipeline mints, so personal-layer Concept overlap
+    is meaningful (issue #16). Mirrors the worker's wiring (main.py)."""
+    model = config.embedding_model()
+    return ConceptNormalizer(
+        OpenAIEmbedder(config.openai_api_key(), model),
+        repo,
+        model=model,
+        merge_distance=config.concept_merge_distance(),
+    )
 
 
 @app.get("/api/health")
@@ -460,3 +484,315 @@ def concept_detail(concept_id: int) -> dict:
     if concept is None:
         raise HTTPException(status_code=404, detail="concept not found")
     return _concept_dict(concept)
+
+
+# == Personal layer: Goals, Markers, Decisions & linking (issue #16) ========
+#
+# The owner-specific layer (CONTEXT.md "Personal Layer"), recorded through guided
+# forms and linked to the evidence layer by Concept overlap. Reads are plain
+# repository reads; writes go through the `personal` service, which owns the
+# transaction and normalizes Concept mentions through the same Embedder the admit
+# pipeline uses (ADR-0008). A Marker reading is append-only — the database rejects
+# any overwrite — and "out of range" is derived from the stored reference range,
+# not a stored flag.
+
+
+class NewGoal(BaseModel):
+    """A Goal to record — a stable intention or risk and the Concepts it concerns."""
+
+    title: str
+    detail: str | None = None
+    concepts: list[str] = []
+
+
+class NewMarker(BaseModel):
+    """A Marker reading to append: value + unit + reference range + date, against a
+    Concept. Either reference bound may be omitted for a one-sided range."""
+
+    concept: str
+    value: float
+    unit: str
+    reference_low: float | None = None
+    reference_high: float | None = None
+    measured_at: datetime
+
+
+class NewDecision(BaseModel):
+    """A Decision to record, with its own actual parameters. `implements_protocol_id`
+    is set by the "adopt a Protocol" path, which pre-fills the form and links the
+    Protocol (issue #16)."""
+
+    action: str
+    dose: str | None = None
+    timing: str | None = None
+    frequency: str | None = None
+    duration: str | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    note: str | None = None
+    concepts: list[str] = []
+    implements_protocol_id: int | None = None
+
+
+class DecisionLink(BaseModel):
+    """A link to confirm from a Decision to a Protocol/Goal/Marker/Claim."""
+
+    target_type: str
+    target_id: int
+
+
+def _goal_dict(g: Goal) -> dict:
+    return {
+        "id": g.id,
+        "title": g.title,
+        "detail": g.detail,
+        "concepts": [{"id": r.id, "name": r.name} for r in g.concepts],
+        "served_by": [{"id": r.id, "action": r.action} for r in g.served_by],
+    }
+
+
+def _reading_dict(m: MarkerReading) -> dict:
+    return {
+        "id": m.id,
+        "concept": {"id": m.concept.id, "name": m.concept.name},
+        "value": m.value,
+        "unit": m.unit,
+        "reference_low": m.reference_low,
+        "reference_high": m.reference_high,
+        "measured_at": m.measured_at.isoformat(),
+        "out_of_range": m.out_of_range,
+    }
+
+
+def _series_dict(s: MarkerSeries) -> dict:
+    return {
+        "concept": {"id": s.concept.id, "name": s.concept.name},
+        "unit": s.unit,
+        "reading_count": s.reading_count,
+        "latest": _reading_dict(s.latest),
+        "out_of_range": s.latest.out_of_range,
+    }
+
+
+def _decision_dict(d: Decision) -> dict:
+    return {
+        "id": d.id,
+        "action": d.action,
+        "dose": d.dose,
+        "timing": d.timing,
+        "frequency": d.frequency,
+        "duration": d.duration,
+        "started_at": d.started_at.isoformat(),
+        "ended_at": d.ended_at.isoformat() if d.ended_at else None,
+        "note": d.note,
+        "concepts": [{"id": r.id, "name": r.name} for r in d.concepts],
+        "implements": [{"id": r.id, "action": r.action} for r in d.implements],
+        "serves": [{"id": r.id, "title": r.title} for r in d.serves],
+        "motivated_by": [
+            {
+                "id": r.id,
+                "concept": r.concept,
+                "value": r.value,
+                "unit": r.unit,
+                "measured_at": r.measured_at.isoformat(),
+            }
+            for r in d.motivated_by
+        ],
+        "supported_by": [{"id": r.id, "text": r.text} for r in d.supported_by],
+    }
+
+
+def _suggestion_dict(s: SuggestedLink) -> dict:
+    return {
+        "target_type": s.target_type,
+        "target_id": s.target_id,
+        "label": s.label,
+        "shared_concepts": s.shared_concepts,
+    }
+
+
+# -- Goals ------------------------------------------------------------------
+
+
+@app.get("/api/goals")
+def list_goals() -> dict:
+    """Every Goal with the Concepts it concerns and the Decisions that serve it."""
+    with _repo() as repo:
+        goals = repo.list_goals()
+    return {"goals": [_goal_dict(g) for g in goals]}
+
+
+@app.post("/api/goals")
+def create_goal(body: NewGoal) -> dict:
+    """Record a Goal and its Concepts (normalized like a Claim's)."""
+    with _repo() as repo:
+        goal_id = personal.record_goal(
+            title=body.title,
+            detail=body.detail,
+            concepts=body.concepts,
+            normalizer=_normalizer(repo),
+            repo=repo,
+        )
+    return {"id": goal_id}
+
+
+@app.get("/api/goals/{goal_id}")
+def goal_detail(goal_id: int) -> dict:
+    """One Goal with its Concepts and serving Decisions (unmet if none serve it)."""
+    with _repo() as repo:
+        goal = repo.get_goal(goal_id)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="goal not found")
+    return _goal_dict(goal)
+
+
+@app.delete("/api/goals/{goal_id}")
+def delete_goal(goal_id: int) -> dict:
+    """Delete a Goal and the edges hanging off it (issue #16)."""
+    with _repo() as repo:
+        deleted = personal.delete_goal(goal_id, repo=repo)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="goal not found")
+    return {"id": goal_id, "deleted": True}
+
+
+# -- Markers ----------------------------------------------------------------
+
+
+@app.get("/api/markers")
+def list_markers() -> dict:
+    """One series per tracked Concept: its latest reading + derived out-of-range."""
+    with _repo() as repo:
+        series = repo.list_marker_series()
+    return {"markers": [_series_dict(s) for s in series]}
+
+
+@app.post("/api/markers")
+def create_marker(body: NewMarker) -> dict:
+    """Append a Marker reading — never an overwrite (CONTEXT.md "Marker")."""
+    with _repo() as repo:
+        reading_id = personal.record_marker(
+            concept=body.concept,
+            value=body.value,
+            unit=body.unit,
+            reference_low=body.reference_low,
+            reference_high=body.reference_high,
+            measured_at=body.measured_at,
+            normalizer=_normalizer(repo),
+            repo=repo,
+        )
+    return {"id": reading_id}
+
+
+@app.get("/api/marker-readings")
+def list_marker_readings() -> dict:
+    """Every reading, newest first — the picker for a Decision's `motivated_by`."""
+    with _repo() as repo:
+        readings = repo.list_marker_readings()
+    return {"readings": [_reading_dict(m) for m in readings]}
+
+
+@app.get("/api/markers/{concept_id}")
+def marker_history(concept_id: int) -> dict:
+    """A Concept's whole Marker history as a series, each reading's out-of-range derived."""
+    with _repo() as repo:
+        readings = repo.marker_history(concept_id)
+    return {"concept_id": concept_id, "readings": [_reading_dict(m) for m in readings]}
+
+
+# -- Decisions --------------------------------------------------------------
+
+
+@app.get("/api/decisions")
+def list_decisions() -> dict:
+    """Every Decision with the Concepts it references; connections come on detail."""
+    with _repo() as repo:
+        decisions = repo.list_decisions()
+    return {"decisions": [_decision_dict(d) for d in decisions]}
+
+
+@app.post("/api/decisions")
+def create_decision(body: NewDecision) -> dict:
+    """Record a Decision; an `implements_protocol_id` adopts that Protocol (issue #16)."""
+    with _repo() as repo:
+        decision_id = personal.record_decision(
+            action=body.action,
+            dose=body.dose,
+            timing=body.timing,
+            frequency=body.frequency,
+            duration=body.duration,
+            started_at=body.started_at,
+            ended_at=body.ended_at,
+            note=body.note,
+            concepts=body.concepts,
+            implements_protocol_id=body.implements_protocol_id,
+            normalizer=_normalizer(repo),
+            repo=repo,
+        )
+    return {"id": decision_id}
+
+
+@app.get("/api/decisions/{decision_id}")
+def decision_detail(decision_id: int) -> dict:
+    """One Decision with its full rationale: implements/serves/motivated_by/supported_by."""
+    with _repo() as repo:
+        decision = repo.get_decision(decision_id)
+    if decision is None:
+        raise HTTPException(status_code=404, detail="decision not found")
+    return _decision_dict(decision)
+
+
+@app.delete("/api/decisions/{decision_id}")
+def delete_decision(decision_id: int) -> dict:
+    """Delete a Decision and the edges hanging off it (issue #16)."""
+    with _repo() as repo:
+        deleted = personal.delete_decision(decision_id, repo=repo)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="decision not found")
+    return {"id": decision_id, "deleted": True}
+
+
+@app.get("/api/decisions/{decision_id}/suggestions")
+def decision_suggestions(decision_id: int) -> dict:
+    """Protocols, Claims, and Goals relevant to a Decision by Concept overlap."""
+    with _repo() as repo:
+        suggestions = personal.suggest_decision_links(decision_id, repo=repo)
+    return {"suggestions": [_suggestion_dict(s) for s in suggestions]}
+
+
+@app.post("/api/decisions/{decision_id}/links")
+def confirm_decision_link(decision_id: int, body: DecisionLink) -> dict:
+    """Confirm a suggested (or owner-chosen) link from a Decision (issue #16)."""
+    with _repo() as repo:
+        try:
+            linked = personal.link_decision(
+                decision_id,
+                target_type=body.target_type,
+                target_id=body.target_id,
+                repo=repo,
+            )
+        except UnknownLinkTarget as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not linked:
+        raise HTTPException(status_code=404, detail="decision not found")
+    return {"decision_id": decision_id, "linked": True}
+
+
+@app.delete("/api/decisions/{decision_id}/links")
+def detach_decision_link(
+    decision_id: int, target_type: str, target_id: int
+) -> dict:
+    """Detach a previously-confirmed link from a Decision (issue #16)."""
+    with _repo() as repo:
+        try:
+            removed = personal.unlink_decision(
+                decision_id,
+                target_type=target_type,
+                target_id=target_id,
+                repo=repo,
+            )
+        except UnknownLinkTarget as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="link not found")
+    return {"decision_id": decision_id, "unlinked": True}

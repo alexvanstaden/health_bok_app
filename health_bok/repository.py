@@ -294,6 +294,195 @@ class StoredCandidate:
         return thumbnail_url(self.video_id)
 
 
+# -- Personal-layer browser shapes (issue #16) ------------------------------
+#
+# The owner-specific layer (CONTEXT.md "Personal Layer"): Goals, Markers, and
+# Decisions, read back for the Web App. Like the BoK browser shapes a detail read
+# carries the *other* end of each connection as a lightweight ref the Web App turns
+# into a navigable link; a reading's "out of range" is *derived* here from the
+# stored reference range (CONTEXT.md "Marker"), never a persisted flag.
+
+
+@dataclass(frozen=True)
+class GoalRef:
+    """A Goal as the far end of a connection (its title labels the link)."""
+
+    id: int
+    title: str
+
+
+@dataclass(frozen=True)
+class DecisionRef:
+    """A Decision as the far end of a connection (its action labels the link)."""
+
+    id: int
+    action: str
+
+
+@dataclass(frozen=True)
+class MarkerRef:
+    """A Marker reading as the far end of a `motivated_by` link — enough to label it."""
+
+    id: int
+    concept: str
+    value: float
+    unit: str
+    measured_at: datetime
+
+
+@dataclass(frozen=True)
+class Goal:
+    """A Goal in the personal-layer browser: its title/detail, the Concepts it
+    concerns, and the Decisions that serve it. An *unmet* Goal has an empty
+    `served_by` — the prime target for an `opportunity` Impact later (CONTEXT.md).
+    """
+
+    id: int
+    title: str
+    detail: str | None
+    concepts: list[ConceptRef]
+    served_by: list[DecisionRef] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MarkerReading:
+    """One dated Marker reading referencing a Concept. `out_of_range` is *derived*
+    from the stored reference range — below `reference_low` or above
+    `reference_high` (either bound may be absent for a one-sided range) — never a
+    stored flag (CONTEXT.md "Marker").
+    """
+
+    id: int
+    concept: ConceptRef
+    value: float
+    unit: str
+    reference_low: float | None
+    reference_high: float | None
+    measured_at: datetime
+
+    @property
+    def out_of_range(self) -> bool:
+        if self.reference_low is not None and self.value < self.reference_low:
+            return True
+        if self.reference_high is not None and self.value > self.reference_high:
+            return True
+        return False
+
+
+@dataclass(frozen=True)
+class MarkerSeries:
+    """A Marker as a time-series, one per referenced Concept: its latest reading
+    (carrying the derived out-of-range) and how many readings the history holds.
+    """
+
+    concept: ConceptRef
+    unit: str
+    reading_count: int
+    latest: MarkerReading
+
+
+@dataclass(frozen=True)
+class Decision:
+    """A Decision in the personal-layer browser. It holds its *own actual*
+    parameters — distinct from the Protocol it implements, so deviation is
+    first-class (CONTEXT.md "Decision"). A *detail* read fills every connection
+    that forms its rationale: the Protocol(s) it `implements`, the Goal(s) it
+    `serves`, the Marker(s) that `motivated_by` it, the Claim(s) that `support` it,
+    and the Concepts it references. A list read fills only `concepts`.
+    """
+
+    id: int
+    action: str
+    dose: str | None
+    timing: str | None
+    frequency: str | None
+    duration: str | None
+    started_at: datetime
+    ended_at: datetime | None
+    note: str | None
+    concepts: list[ConceptRef]
+    implements: list[ProtocolRef] = field(default_factory=list)
+    serves: list[GoalRef] = field(default_factory=list)
+    motivated_by: list[MarkerRef] = field(default_factory=list)
+    supported_by: list[ClaimRef] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SuggestedLink:
+    """A suggest-then-confirm candidate for a Decision (issue #16): an entity that
+    shares a Concept with the Decision and so may be worth linking. `target_type`
+    is 'protocol' | 'claim' | 'goal'; confirming asserts the matching edge
+    (implements | supports | serves). `shared_concepts` are the overlapping Concept
+    names, so the owner can see *why* it was suggested before confirming.
+    """
+
+    target_type: str
+    target_id: int
+    label: str
+    shared_concepts: list[str]
+
+
+# Shared projections for the personal-layer reads, mirroring the BoK ones above:
+# every column a `Goal`/`Decision`/`MarkerReading` shape needs, with referenced
+# Concepts (and, for a Goal, its serving Decisions) rolled up so a list read needs
+# no N+1 follow-ups. List and detail reads bolt their own WHERE onto these.
+_GOAL_SELECT = (
+    "SELECT g.id, g.title, g.detail, " + _concept_refs_sql("goal", "g.id") + ", "
+    "COALESCE((SELECT json_agg(json_build_object('id', d.id, 'action', d.action) "
+    "ORDER BY d.action, d.id) FROM edges e JOIN decisions d ON d.id = e.src_id "
+    "WHERE e.dst_type = 'goal' AND e.dst_id = g.id AND e.src_type = 'decision' "
+    "AND e.kind = 'serves'), '[]'::json) "
+    "FROM goals g"
+)
+_DECISION_SELECT = (
+    "SELECT d.id, d.action, d.dose, d.timing, d.frequency, d.duration, "
+    "d.started_at, d.ended_at, d.note, " + _concept_refs_sql("decision", "d.id") + " "
+    "FROM decisions d"
+)
+_MARKER_READING_SELECT = (
+    "SELECT m.id, m.concept_id, c.name, m.value, m.unit, "
+    "m.reference_low, m.reference_high, m.measured_at "
+    "FROM markers m JOIN concepts c ON c.id = m.concept_id"
+)
+
+
+def _row_to_goal(r) -> Goal:
+    return Goal(
+        id=r[0],
+        title=r[1],
+        detail=r[2],
+        concepts=[ConceptRef(id=c["id"], name=c["name"]) for c in r[3]],
+        served_by=[DecisionRef(id=d["id"], action=d["action"]) for d in r[4]],
+    )
+
+
+def _row_to_decision(r) -> Decision:
+    return Decision(
+        id=r[0],
+        action=r[1],
+        dose=r[2],
+        timing=r[3],
+        frequency=r[4],
+        duration=r[5],
+        started_at=r[6],
+        ended_at=r[7],
+        note=r[8],
+        concepts=[ConceptRef(id=c["id"], name=c["name"]) for c in r[9]],
+    )
+
+
+def _row_to_marker_reading(r) -> MarkerReading:
+    return MarkerReading(
+        id=r[0],
+        concept=ConceptRef(id=r[1], name=r[2]),
+        value=float(r[3]),
+        unit=r[4],
+        reference_low=float(r[5]) if r[5] is not None else None,
+        reference_high=float(r[6]) if r[6] is not None else None,
+        measured_at=r[7],
+    )
+
+
 class Repository:
     """Thin data-access layer over Postgres for the slice-1 tables."""
 
@@ -1163,6 +1352,322 @@ class Repository:
                 (protocol_id,),
             )
             cur.execute("DELETE FROM protocols WHERE id = %s", (protocol_id,))
+            return cur.rowcount > 0
+
+    # == Personal layer: Goals, Markers, Decisions & linking (issue #16) ======
+    #
+    # The owner-specific layer (CONTEXT.md "Personal Layer"). Writes record a Goal,
+    # a Marker reading, or a Decision and assert its Concept-`references` edges;
+    # reads list and open each with its connections resolved over `edges`; the
+    # suggester finds Protocols/Claims/Goals sharing a Concept with a Decision so the
+    # owner can confirm a link. As elsewhere these do not commit — the caller (the
+    # `personal` service) owns the transaction boundary.
+
+    # -- Goals ---------------------------------------------------------------
+
+    def add_goal(self, *, title: str, detail: str | None = None) -> int:
+        """Persist a Goal — a stable intention or risk (CONTEXT.md "Goal")."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO goals (title, detail) VALUES (%s, %s) RETURNING id",
+                (title, detail),
+            )
+            return cur.fetchone()[0]
+
+    def list_goals(self) -> list[Goal]:
+        """Every Goal, newest first, each with the Concepts it concerns and the
+        Decisions that serve it — so an *unmet* Goal (empty `served_by`) is visible.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(_GOAL_SELECT + " ORDER BY g.created_at DESC, g.id DESC")
+            return [_row_to_goal(r) for r in cur.fetchall()]
+
+    def get_goal(self, goal_id: int) -> Goal | None:
+        """One Goal with its Concepts and serving Decisions, or ``None`` if gone."""
+        with self._conn.cursor() as cur:
+            cur.execute(_GOAL_SELECT + " WHERE g.id = %s", (goal_id,))
+            row = cur.fetchone()
+        return _row_to_goal(row) if row is not None else None
+
+    def delete_goal(self, goal_id: int) -> bool:
+        """Delete a Goal and the edges hanging off it (its Concept `references` and
+        any inbound `decision -> goal serves`), so none dangle. ``False`` if gone.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM edges WHERE (src_type = 'goal' AND src_id = %(id)s) "
+                "OR (dst_type = 'goal' AND dst_id = %(id)s)",
+                {"id": goal_id},
+            )
+            cur.execute("DELETE FROM goals WHERE id = %s", (goal_id,))
+            return cur.rowcount > 0
+
+    # -- Markers (append-only time-series) -----------------------------------
+
+    def add_marker_reading(
+        self,
+        *,
+        concept_id: int,
+        value: float,
+        unit: str,
+        reference_low: float | None,
+        reference_high: float | None,
+        measured_at: datetime,
+    ) -> int:
+        """Append one dated Marker reading (CONTEXT.md "Marker").
+
+        Always an INSERT — never an update: the database trigger blocks any mutate,
+        so a reading is an immutable snapshot and a correction is a *new* reading.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO markers (concept_id, value, unit, reference_low, "
+                "reference_high, measured_at) VALUES (%s, %s, %s, %s, %s, %s) "
+                "RETURNING id",
+                (concept_id, value, unit, reference_low, reference_high, measured_at),
+            )
+            return cur.fetchone()[0]
+
+    def list_marker_series(self) -> list[MarkerSeries]:
+        """One series per referenced Concept: its latest reading + reading count.
+
+        The Web App's Marker overview — each Concept the owner tracks, its most
+        recent value (with derived out-of-range) and how deep the history runs.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "WITH latest AS ("
+                "  SELECT DISTINCT ON (concept_id) id, concept_id, value, unit, "
+                "         reference_low, reference_high, measured_at "
+                "  FROM markers ORDER BY concept_id, measured_at DESC, id DESC) "
+                "SELECT l.id, l.concept_id, c.name, l.value, l.unit, "
+                "       l.reference_low, l.reference_high, l.measured_at, "
+                "       (SELECT count(*) FROM markers m2 WHERE m2.concept_id = l.concept_id) "
+                "FROM latest l JOIN concepts c ON c.id = l.concept_id "
+                "ORDER BY c.name, l.concept_id"
+            )
+            return [
+                MarkerSeries(
+                    concept=ConceptRef(id=r[1], name=r[2]),
+                    unit=r[4],
+                    reading_count=r[8],
+                    latest=_row_to_marker_reading(r[:8]),
+                )
+                for r in cur.fetchall()
+            ]
+
+    def marker_history(self, concept_id: int) -> list[MarkerReading]:
+        """A Concept's whole Marker history as a series, newest reading first."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                _MARKER_READING_SELECT + " WHERE m.concept_id = %s "
+                "ORDER BY m.measured_at DESC, m.id DESC",
+                (concept_id,),
+            )
+            return [_row_to_marker_reading(r) for r in cur.fetchall()]
+
+    def list_marker_readings(self) -> list[MarkerReading]:
+        """Every Marker reading, newest first — the picker for a Decision's
+        `motivated_by` link (which reading prompted the Decision).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                _MARKER_READING_SELECT + " ORDER BY m.measured_at DESC, m.id DESC"
+            )
+            return [_row_to_marker_reading(r) for r in cur.fetchall()]
+
+    # -- Decisions -----------------------------------------------------------
+
+    def add_decision(
+        self,
+        *,
+        action: str,
+        dose: str | None,
+        timing: str | None,
+        frequency: str | None,
+        duration: str | None,
+        started_at: datetime,
+        ended_at: datetime | None,
+        note: str | None,
+    ) -> int:
+        """Persist a Decision with its own actual parameters (CONTEXT.md "Decision")."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO decisions (action, dose, timing, frequency, duration, "
+                "started_at, ended_at, note) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "RETURNING id",
+                (action, dose, timing, frequency, duration, started_at, ended_at, note),
+            )
+            return cur.fetchone()[0]
+
+    def list_decisions(self) -> list[Decision]:
+        """Every Decision, newest started first, each with the Concepts it
+        references; the rest of a Decision's connections come on the detail read.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(_DECISION_SELECT + " ORDER BY d.started_at DESC, d.id DESC")
+            return [_row_to_decision(r) for r in cur.fetchall()]
+
+    def get_decision(self, decision_id: int) -> Decision | None:
+        """One Decision with its full rationale, or ``None`` if it's gone.
+
+        Fills every connection by traversing `edges` both ways: the Protocol(s) it
+        `implements`, the Goal(s) it `serves`, the Marker(s) that `motivated_by` it,
+        and the Claim(s) that `support` it — so the owner can review the supporting
+        evidence and the Goals served from one place (issue #16).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(_DECISION_SELECT + " WHERE d.id = %s", (decision_id,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            decision = _row_to_decision(row)
+            cur.execute(
+                "SELECT p.id, p.action FROM edges e "
+                "JOIN protocols p ON p.id = e.dst_id "
+                "WHERE e.src_type = 'decision' AND e.src_id = %s "
+                "AND e.dst_type = 'protocol' AND e.kind = 'implements' "
+                "ORDER BY p.action, p.id",
+                (decision_id,),
+            )
+            implements = [ProtocolRef(id=r[0], action=r[1]) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT g.id, g.title FROM edges e JOIN goals g ON g.id = e.dst_id "
+                "WHERE e.src_type = 'decision' AND e.src_id = %s "
+                "AND e.dst_type = 'goal' AND e.kind = 'serves' "
+                "ORDER BY g.title, g.id",
+                (decision_id,),
+            )
+            serves = [GoalRef(id=r[0], title=r[1]) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT m.id, c.name, m.value, m.unit, m.measured_at FROM edges e "
+                "JOIN markers m ON m.id = e.dst_id "
+                "JOIN concepts c ON c.id = m.concept_id "
+                "WHERE e.src_type = 'decision' AND e.src_id = %s "
+                "AND e.dst_type = 'marker' AND e.kind = 'motivated_by' "
+                "ORDER BY m.measured_at DESC, m.id DESC",
+                (decision_id,),
+            )
+            motivated_by = [
+                MarkerRef(id=r[0], concept=r[1], value=float(r[2]), unit=r[3],
+                          measured_at=r[4])
+                for r in cur.fetchall()
+            ]
+            cur.execute(
+                "SELECT cl.id, cl.text FROM edges e JOIN claims cl ON cl.id = e.src_id "
+                "WHERE e.dst_type = 'decision' AND e.dst_id = %s "
+                "AND e.src_type = 'claim' AND e.kind = 'supports' "
+                "ORDER BY cl.id",
+                (decision_id,),
+            )
+            supported_by = [ClaimRef(id=r[0], text=r[1]) for r in cur.fetchall()]
+        return replace(
+            decision,
+            implements=implements,
+            serves=serves,
+            motivated_by=motivated_by,
+            supported_by=supported_by,
+        )
+
+    def delete_decision(self, decision_id: int) -> bool:
+        """Delete a Decision and every edge hanging off it (Concept `references`,
+        `implements`/`serves`/`motivated_by` it owns, and inbound `claim supports`),
+        so none dangle. ``False`` if it's already gone.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM edges WHERE (src_type = 'decision' AND src_id = %(id)s) "
+                "OR (dst_type = 'decision' AND dst_id = %(id)s)",
+                {"id": decision_id},
+            )
+            cur.execute("DELETE FROM decisions WHERE id = %s", (decision_id,))
+            return cur.rowcount > 0
+
+    # -- suggest-then-confirm linking ----------------------------------------
+
+    def concept_ids_for(self, src_type: str, src_id: int) -> list[int]:
+        """The Concept ids a Claim/Protocol/Goal/Decision references.
+
+        Used to seed a Decision's Concepts from the Protocol it adopts, so the
+        suggester has overlap to work with the moment the Decision is recorded.
+        `src_type` is a caller-controlled literal, never user input.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT dst_id FROM edges WHERE src_type = %s AND src_id = %s "
+                "AND dst_type = 'concept' AND kind = 'references' ORDER BY dst_id",
+                (src_type, src_id),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def decision_link_suggestions(self, decision_id: int) -> list[SuggestedLink]:
+        """Protocols, Claims, and Goals that share a Concept with the Decision.
+
+        The suggest half of suggest-then-confirm (issue #16): an entity is relevant
+        when it `references` a Concept the Decision also references — the Concept
+        overlap built on the normalized Concepts from Slice 8. Anything already
+        linked to this Decision is excluded, so confirming a suggestion removes it
+        from the next round. Ordered most-overlapping first within each kind.
+        """
+        suggestions: list[SuggestedLink] = []
+        with self._conn.cursor() as cur:
+            for node_type, table, label_col, exclude in (
+                (
+                    "protocol", "protocols", "action",
+                    "NOT EXISTS (SELECT 1 FROM edges x WHERE x.src_type = 'decision' "
+                    "AND x.src_id = %(d)s AND x.dst_type = 'protocol' "
+                    "AND x.dst_id = n.id AND x.kind = 'implements')",
+                ),
+                (
+                    "claim", "claims", "text",
+                    "NOT EXISTS (SELECT 1 FROM edges x WHERE x.src_type = 'claim' "
+                    "AND x.src_id = n.id AND x.dst_type = 'decision' "
+                    "AND x.dst_id = %(d)s AND x.kind = 'supports')",
+                ),
+                (
+                    "goal", "goals", "title",
+                    "NOT EXISTS (SELECT 1 FROM edges x WHERE x.src_type = 'decision' "
+                    "AND x.src_id = %(d)s AND x.dst_type = 'goal' "
+                    "AND x.dst_id = n.id AND x.kind = 'serves')",
+                ),
+            ):
+                cur.execute(
+                    "WITH dc AS (SELECT dst_id FROM edges WHERE src_type = 'decision' "
+                    "AND src_id = %(d)s AND dst_type = 'concept' AND kind = 'references') "
+                    f"SELECT n.id, n.{label_col}, "
+                    "array_agg(DISTINCT c.name ORDER BY c.name) "
+                    f"FROM edges e JOIN dc ON dc.dst_id = e.dst_id "
+                    f"JOIN {table} n ON n.id = e.src_id "
+                    "JOIN concepts c ON c.id = e.dst_id "
+                    f"WHERE e.src_type = %(t)s AND e.dst_type = 'concept' "
+                    f"AND e.kind = 'references' AND {exclude} "
+                    f"GROUP BY n.id, n.{label_col} "
+                    "ORDER BY count(*) DESC, 2",
+                    {"d": decision_id, "t": node_type},
+                )
+                suggestions.extend(
+                    SuggestedLink(
+                        target_type=node_type,
+                        target_id=r[0],
+                        label=r[1],
+                        shared_concepts=list(r[2]),
+                    )
+                    for r in cur.fetchall()
+                )
+        return suggestions
+
+    def remove_edge(
+        self, src_type: str, src_id: int, dst_type: str, dst_id: int, kind: str
+    ) -> bool:
+        """Drop one edge, e.g. when the owner detaches a confirmed link. Returns
+        whether an edge was removed.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM edges WHERE src_type = %s AND src_id = %s "
+                "AND dst_type = %s AND dst_id = %s AND kind = %s",
+                (src_type, src_id, dst_type, dst_id, kind),
+            )
             return cur.rowcount > 0
 
     # -- helpers -------------------------------------------------------------
