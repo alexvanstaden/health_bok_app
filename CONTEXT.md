@@ -1,10 +1,21 @@
 # Health & Longevity Knowledge System
 
 A personal system that monitors health & longevity content creators, archives and
-summarizes their material, and (later) links it into a personalized knowledge graph
-connecting evidence to the owner's health decisions, status, and goals.
+summarizes their material, and links it into a personalized knowledge graph connecting
+evidence to the owner's health decisions, markers, and goals. The owner works with the
+system through a self-hosted **Web App**; the daily email **Digest** is only a notification.
 
 ## Language
+
+**Web App**:
+The self-hosted Next.js web application the owner works in — the primary interface to the whole
+system, and the only committed one (ADR-0009). From it the owner manages Creators, triggers
+backfill, reviews and approves Candidates into the Body of Knowledge, searches and queries it in
+natural language, and records the personal layer (Goals, Markers, Decisions). Everything the
+system can do, it does here; the email Digest is only a notification that links back into the Web
+App (see ADR-0007, ADR-0009). The system stays fully usable with email switched off. A Python CLI
+may exist for ops/admin convenience only — never a primary surface.
+_Avoid_: dashboard, admin panel, portal, console
 
 **Source**:
 A specific, citable content item that Claims and Protocols are drawn from — a YouTube video, a
@@ -27,14 +38,16 @@ re-derivable artifact — never treated as source of truth.
 _Avoid_: notes, write-up
 
 **Digest**:
-The single daily email bundling all new summaries (and, later, change-detection alerts).
-Sent only on days when there is new content.
-_Avoid_: newsletter, report
+A summary *notification* email — sent only on days with new content — that nudges the owner and
+links into the Web App, where the real work (reviewing summaries, approving Candidates, acting on
+Impacts) happens. A convenience, never the place curation occurs; the owner can do everything the
+Digest references, and far more, directly in the Web App (see ADR-0007).
+_Avoid_: newsletter, report, dashboard
 
 **Candidate**:
 Any video not yet admitted to the Body of Knowledge. Daily candidates already have an archived
-transcript and an emailed summary; backfill candidates are known only by metadata (title,
-description, publish date, URL) until approved. Either way, entry into the Body of Knowledge
+transcript and an emailed summary; backfill candidates are known only by metadata (thumbnail,
+title, description, publish date, URL) until approved. Either way, entry into the Body of Knowledge
 requires explicit owner **approval** at the video level — the approval *is* the relevance
 filter; the owner curates. One gate for all content, daily and backfill.
 _Avoid_: backlog item, pending video, unprocessed video
@@ -86,7 +99,7 @@ _Avoid_: status, biomarker, vitals, metric, reading
 **Concept**:
 A normalized, deduplicated hub node for something the domain talks about — a supplement,
 body system, symptom, mechanism, condition, or intervention. Claims, Protocols, Decisions,
-Goals, and Status all *reference* Concepts; relatedness and contradiction are computed by
+Goals, and Markers all *reference* Concepts; relatedness and contradiction are computed by
 traversing shared Concepts. Unlike Claims, Concepts MAY be merged/normalized — that is
 their purpose.
 _Avoid_: tag, topic, keyword, entity
@@ -94,10 +107,12 @@ _Avoid_: tag, topic, keyword, entity
 ## Change Detection
 
 **Impact**:
-A detected, stance-typed link from a newly-ingested Claim or Protocol to an existing anchor
-(a Decision, a Claim supporting it, a Goal, or a Marker). Carries a **stance** and is a
-first-class, persisted object with a lifecycle (`new → reviewed → actioned | dismissed`), so
-it never re-nags and leaves an audit trail of what the owner saw and chose.
+A detected, stance-typed link between newly-arrived knowledge and an existing anchor — fired in
+*either direction*: a newly-ingested Claim or Protocol checked against existing anchors (a Decision,
+a Claim supporting it, a Goal, or a Marker), **or** a newly-recorded anchor (a Decision or Goal)
+checked against the existing Body of Knowledge. Carries a **stance** and is a first-class, persisted
+object with a lifecycle (`new → reviewed → actioned | dismissed`), so it never re-nags and leaves an
+audit trail of what the owner saw and chose.
 _Avoid_: alert, flag, notification, match, hit
 
 **Stance**:
