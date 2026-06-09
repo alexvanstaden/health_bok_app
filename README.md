@@ -1,9 +1,22 @@
 # Health & Longevity Knowledge System
 
 A personal system that monitors health & longevity content creators, archives and
-summarizes their material, and (later) links it into a personalized knowledge graph.
-See [`CONTEXT.md`](CONTEXT.md) for the domain language and [`docs/adr/`](docs/adr/)
-for the architectural decisions.
+summarizes their material, and links it into a personalized knowledge graph connecting
+evidence to the owner's health decisions, markers, and goals. The owner works through a
+self-hosted **Web App** (ADR-0007, ADR-0009); the daily email **Digest** is only a
+notification that links back into it. See [`CONTEXT.md`](CONTEXT.md) for the domain
+language and [`docs/adr/`](docs/adr/) for the architectural decisions.
+
+The system is built in two parts:
+
+- **Part 1 — the daily pipeline** (PRD issue #1) — **built today.** Watches Creators,
+  detects new uploads, archives immutable Transcripts in Postgres, summarizes them, and
+  emails a Digest. **This README documents Part 1: what it does and how to run it.**
+- **Part 2 — the Web App & knowledge graph** (PRD issue #12; ADRs 0007–0011) — *in
+  progress.* The self-hosted Web App is the primary interface: the owner approves
+  Candidates, extraction draws Claims and Protocols into the Body of Knowledge, records
+  the personal layer (Goals, Markers, Decisions), and queries it all in grounded, cited
+  natural language. Tracked in slices #13–18; not yet built.
 
 ## Status
 
@@ -58,16 +71,20 @@ Summary is generated, and **Whisper is never called** for backfill. A backfill
 Candidate stays metadata-only until the owner approves it into the Body of
 Knowledge (ADR-0004); listing is idempotent, so re-adding a Creator only tops up
 newly-published Candidates. Reviewing and approving Candidates — and the
-processing that approval triggers — is Part 2, deferred to later slices.
+processing that approval triggers — is Part 2 (below).
 
-Everything else — Candidate approval and all of Part 2 (the knowledge graph) — is
-deferred to later slices.
+Candidate approval, extraction into the Body of Knowledge, the personal layer, and
+grounded natural-language query are **Part 2** — now specified in PRD issue #12 and ADRs
+0007–0011, and built in slices #13–18. All of it happens in the **Web App**, never in
+email; the Digest only links into it (ADR-0007).
 
 ## Architecture
 
 A single self-hosted **Postgres** is the only source of truth (ADR-0003). The
 raw Transcript is the permanent record; the Summary is disposable and
-re-derivable (ADR-0001). No graph/entity extraction runs here.
+re-derivable (ADR-0001). No graph/entity extraction runs in Part 1 — the typed
+entity tables, polymorphic edges, and embeddings (ADR-0008) and the extraction
+that fills them (ADR-0010) are Part 2, layered onto this same Postgres.
 
 Four **ports** isolate every external boundary so the job can be tested with
 fakes while Postgres stays real:
@@ -171,8 +188,8 @@ Adding a Creator also **backfills** its recent back-catalogue as metadata-only
 **Candidates** (issue #7): every past upload published within `BACKFILL_CUTOFF_DAYS`
 (default ~2 years) is recorded by title, description, publish date, and URL — with
 no Transcript fetched and Whisper never called. These Candidates await the owner's
-approval into the Body of Knowledge (a later slice); re-adding a Creator only tops
-up newly-published ones.
+approval into the Body of Knowledge — done in the **Web App** (Part 2), never email;
+re-adding a Creator only tops up newly-published ones.
 
 ## Schedule the daily job
 
@@ -196,6 +213,10 @@ sudo cp deploy/systemd/health-bok.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now health-bok.timer
 ```
+
+> Host cron/systemd is the supported path for the Part-1 build today. Part 2 moves the
+> stack into Docker containers and runs this pipeline as a **scheduled container** drained
+> by a Postgres-backed worker instead (ADR-0009) — no second datastore, same Postgres.
 
 ## Tests
 
