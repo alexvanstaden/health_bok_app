@@ -16,8 +16,14 @@ import psycopg
 from .models import (
     CandidateMetadata,
     CreatorIdentity,
+    EvidenceClaim,
+    EvidenceDecision,
+    EvidenceGoal,
+    EvidenceMarker,
+    EvidenceProtocol,
     FetchedTranscript,
     Provenance,
+    RetrievedEvidence,
     TranscriptSegment,
     locator_url,
     thumbnail_url,
@@ -1040,6 +1046,206 @@ class Repository:
         if row is None:
             return None
         return NearestConcept(concept_id=row[0], name=row[1], distance=float(row[2]))
+
+    def nearest_concepts(
+        self, embedding: list[float], *, model: str, limit: int, max_distance: float
+    ) -> list[NearestConcept]:
+        """The Concepts nearest a query embedding, closest first, within a cutoff.
+
+        The pgvector half of grounded retrieval (ADR-0011): a free-text question is
+        embedded and matched against the *same* Concept embeddings normalization
+        and the Impact engine use (ADR-0008), so the three share one retrieval
+        path. Concepts beyond `max_distance` are excluded, so a question the
+        library does not cover retrieves nothing — and the answer abstains — rather
+        than latching onto the merely least-distant Concept. Compared only within
+        one embedding model, since cross-model distances are meaningless.
+        """
+        vec = _vector_literal(embedding)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.id, c.name, e.embedding <=> %s::vector AS distance "
+                "FROM embeddings e JOIN concepts c ON c.id = e.owner_id "
+                "WHERE e.owner_type = 'concept' AND e.model = %s "
+                "  AND e.embedding <=> %s::vector <= %s "
+                "ORDER BY e.embedding <=> %s::vector LIMIT %s",
+                (vec, model, vec, max_distance, vec, limit),
+            )
+            return [
+                NearestConcept(concept_id=r[0], name=r[1], distance=float(r[2]))
+                for r in cur.fetchall()
+            ]
+
+    # -- grounded query retrieval (reads) ------------------------------------
+
+    def retrieve_evidence(
+        self, concept_ids: list[int], *, limit: int
+    ) -> RetrievedEvidence:
+        """Gather the evidence referencing any of `concept_ids` — the Concept-
+        traversal half of grounded retrieval (issue #17, ADR-0011).
+
+        Spans the Body of Knowledge (Claims, Protocols) and the personal layer
+        (Goals, the latest Marker reading per Concept, Decisions), so an answer can
+        be both cited and actionable. Claims, Protocols, Goals, and Decisions are
+        ranked by how many of the query's Concepts they touch (most-overlapping
+        first) and capped at `limit`; the latest-reading-per-Concept Markers are
+        capped too. A Marker references its Concept by FK (`concept_id`), not an
+        edge (ADR-0008), so it is matched directly. Returns empty lists for empty
+        `concept_ids` — the caller's signal to abstain.
+        """
+        if not concept_ids:
+            return RetrievedEvidence()
+        ids = list(dict.fromkeys(concept_ids))
+        return RetrievedEvidence(
+            claims=self._evidence_claims(ids, limit),
+            protocols=self._evidence_protocols(ids, limit),
+            goals=self._evidence_goals(ids, limit),
+            markers=self._evidence_markers(ids, limit),
+            decisions=self._evidence_decisions(ids, limit),
+        )
+
+    def _evidence_claims(self, ids: list[int], limit: int) -> list[EvidenceClaim]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT cl.id, cl.text, cl.type, cl.locator_seconds, v.url, v.title, "
+                "  ARRAY(SELECT c.name FROM edges e2 JOIN concepts c ON c.id = e2.dst_id "
+                "        WHERE e2.src_type = 'claim' AND e2.src_id = cl.id "
+                "          AND e2.dst_type = 'concept' AND e2.kind = 'references' "
+                "        ORDER BY c.name) "
+                "FROM claims cl "
+                "JOIN videos v ON v.video_id = cl.video_id "
+                "JOIN edges e ON e.src_type = 'claim' AND e.src_id = cl.id "
+                "  AND e.dst_type = 'concept' AND e.kind = 'references' "
+                "  AND e.dst_id = ANY(%s) "
+                "GROUP BY cl.id, v.url, v.title "
+                "ORDER BY count(DISTINCT e.dst_id) DESC, cl.id "
+                "LIMIT %s",
+                (ids, limit),
+            )
+            return [
+                EvidenceClaim(
+                    id=r[0],
+                    text=r[1],
+                    type=r[2],
+                    deep_link=locator_url(r[4], r[3]),
+                    source_title=r[5],
+                    concepts=list(r[6]),
+                )
+                for r in cur.fetchall()
+            ]
+
+    def _evidence_protocols(self, ids: list[int], limit: int) -> list[EvidenceProtocol]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.id, p.action, p.dose, p.timing, p.frequency, p.duration, "
+                "  p.locator_seconds, v.url, v.title, "
+                "  ARRAY(SELECT c.name FROM edges e2 JOIN concepts c ON c.id = e2.dst_id "
+                "        WHERE e2.src_type = 'protocol' AND e2.src_id = p.id "
+                "          AND e2.dst_type = 'concept' AND e2.kind = 'references' "
+                "        ORDER BY c.name) "
+                "FROM protocols p "
+                "JOIN videos v ON v.video_id = p.video_id "
+                "JOIN edges e ON e.src_type = 'protocol' AND e.src_id = p.id "
+                "  AND e.dst_type = 'concept' AND e.kind = 'references' "
+                "  AND e.dst_id = ANY(%s) "
+                "GROUP BY p.id, v.url, v.title "
+                "ORDER BY count(DISTINCT e.dst_id) DESC, p.id "
+                "LIMIT %s",
+                (ids, limit),
+            )
+            return [
+                EvidenceProtocol(
+                    id=r[0],
+                    action=r[1],
+                    dose=r[2],
+                    timing=r[3],
+                    frequency=r[4],
+                    duration=r[5],
+                    deep_link=locator_url(r[7], r[6]),
+                    source_title=r[8],
+                    concepts=list(r[9]),
+                )
+                for r in cur.fetchall()
+            ]
+
+    def _evidence_goals(self, ids: list[int], limit: int) -> list[EvidenceGoal]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT g.id, g.title, g.detail, "
+                "  ARRAY(SELECT c.name FROM edges e2 JOIN concepts c ON c.id = e2.dst_id "
+                "        WHERE e2.src_type = 'goal' AND e2.src_id = g.id "
+                "          AND e2.dst_type = 'concept' AND e2.kind = 'references' "
+                "        ORDER BY c.name) "
+                "FROM goals g "
+                "JOIN edges e ON e.src_type = 'goal' AND e.src_id = g.id "
+                "  AND e.dst_type = 'concept' AND e.kind = 'references' "
+                "  AND e.dst_id = ANY(%s) "
+                "GROUP BY g.id "
+                "ORDER BY count(DISTINCT e.dst_id) DESC, g.id "
+                "LIMIT %s",
+                (ids, limit),
+            )
+            return [
+                EvidenceGoal(id=r[0], title=r[1], detail=r[2], concepts=list(r[3]))
+                for r in cur.fetchall()
+            ]
+
+    def _evidence_markers(self, ids: list[int], limit: int) -> list[EvidenceMarker]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "WITH latest AS ("
+                "  SELECT DISTINCT ON (concept_id) concept_id, value, unit, "
+                "         reference_low, reference_high, measured_at "
+                "  FROM markers WHERE concept_id = ANY(%s) "
+                "  ORDER BY concept_id, measured_at DESC, id DESC) "
+                "SELECT c.name, l.value, l.unit, l.reference_low, l.reference_high, "
+                "       l.measured_at "
+                "FROM latest l JOIN concepts c ON c.id = l.concept_id "
+                "ORDER BY c.name LIMIT %s",
+                (ids, limit),
+            )
+            return [
+                EvidenceMarker(
+                    concept=r[0],
+                    value=float(r[1]),
+                    unit=r[2],
+                    reference_low=float(r[3]) if r[3] is not None else None,
+                    reference_high=float(r[4]) if r[4] is not None else None,
+                    measured_at=r[5],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def _evidence_decisions(self, ids: list[int], limit: int) -> list[EvidenceDecision]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT d.id, d.action, d.dose, d.timing, d.frequency, d.duration, "
+                "  d.note, "
+                "  ARRAY(SELECT c.name FROM edges e2 JOIN concepts c ON c.id = e2.dst_id "
+                "        WHERE e2.src_type = 'decision' AND e2.src_id = d.id "
+                "          AND e2.dst_type = 'concept' AND e2.kind = 'references' "
+                "        ORDER BY c.name) "
+                "FROM decisions d "
+                "JOIN edges e ON e.src_type = 'decision' AND e.src_id = d.id "
+                "  AND e.dst_type = 'concept' AND e.kind = 'references' "
+                "  AND e.dst_id = ANY(%s) "
+                "GROUP BY d.id "
+                "ORDER BY count(DISTINCT e.dst_id) DESC, d.id "
+                "LIMIT %s",
+                (ids, limit),
+            )
+            return [
+                EvidenceDecision(
+                    id=r[0],
+                    action=r[1],
+                    dose=r[2],
+                    timing=r[3],
+                    frequency=r[4],
+                    duration=r[5],
+                    note=r[6],
+                    concepts=list(r[7]),
+                )
+                for r in cur.fetchall()
+            ]
 
     # -- Body of Knowledge (reads) -------------------------------------------
 

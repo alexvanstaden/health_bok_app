@@ -158,8 +158,28 @@ Concept set and overlap is meaningful. New typed tables `goals`/`markers`/`decis
 and `claim → decision supports` relationships live in the one polymorphic `edges` table
 (ADR-0008).
 
-Grounded natural-language query and change-detection **Impacts** are the remaining Part-2
-slices (#17–18).
+**Slice 12 — grounded natural-language query (issue #17).** The primary way the owner now
+*explores* the Body of Knowledge (a visual graph is out of v1 scope, ADR-0009/0011). The
+owner asks a free-text question in the Web App's **Ask** tab and gets a **synthesized
+answer, not a list of hits** — grounded **strictly** in their own library:
+
+- **Strictly grounded & always cited** — the answer draws *only* on the owner's curated
+  Body of Knowledge (Claims, Protocols) and personal layer (Goals, Markers, Decisions),
+  never the model's general knowledge, and **cites the specific Claims it rests on** — each
+  clickable through to its Source and the locator deep-link (`watch?v=ID&t=NNNs`).
+- **Abstains honestly** — when nothing in the library covers the question it answers
+  "nothing in your library covers this" rather than confabulating. Abstention is
+  **structural**: a question that retrieves no Concept within a distance cutoff, or no
+  admitted Claim, never reaches the model, and a non-abstaining answer with no resolvable
+  citation is itself treated as an abstention (**cite-or-abstain** has no third state).
+- **Personal scope included** so answers are actionable — "what are my options for lowering
+  apoB given my last reading?" sees the owner's Markers and Decisions.
+- **Retrieval reuses existing machinery** — the question is embedded with the *same*
+  Embedder the admit pipeline uses, matched to the nearest **Concepts** via pgvector, and
+  traversed over `references` edges to the evidence (ADR-0008) — not a new subsystem. The
+  synthesis is a new `QueryAnswerer` port (Claude in production; faked in tests).
+
+Change-detection **Impacts** are the remaining Part-2 slice (#18).
 
 ## Architecture
 
@@ -313,6 +333,14 @@ so there is no login screen). The flow:
    *Adopt as a Decision* to pre-fill one and link the Protocol it implements; on a
    **Decision** confirm or reject the Protocols, Claims, and Goals it overlaps with
    by Concept, link the Markers that motivated it, and review its whole rationale.
+9. **Ask** (top nav, issue #17) is grounded natural-language query — the primary way to
+   *explore* the library. Type a question; get a **synthesized, cited answer** drawn
+   **only** from your own Claims, Protocols, and personal layer (never general knowledge).
+   Each answer **cites the Claims it rests on**, clickable through to the Source and the
+   moment in the video; when nothing covers the question it says so rather than guessing.
+   The API needs the LLM keys (`OPENAI_API_KEY` to embed the question, `ANTHROPIC_API_KEY`
+   to synthesize); `QUERY_MODEL` / `QUERY_MAX_DISTANCE` tune the model and the abstention
+   cutoff.
 
 The worker and pipeline read the same `.env`; the worker needs the LLM keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) to extract and embed. The HTTP API can

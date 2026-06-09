@@ -17,6 +17,8 @@ from health_bok.models import (
     Extraction,
     FetchedAudio,
     FetchedTranscript,
+    GroundedAnswer,
+    RetrievedEvidence,
     TranscriptSegment,
 )
 
@@ -194,6 +196,56 @@ class FakeEmbedder:
         if text in self._vectors:
             return _pad(self._vectors[text], self.DIMS)
         return _hash_vector(text, self.DIMS)
+
+
+class FakeQueryAnswerer:
+    """Fakes the QueryAnswerer port (issue #17): synthesizes from the evidence it's
+    given and cites it — or abstains — without the Claude API.
+
+    Defaults to the grounded path: cites *every* retrieved Claim and returns a
+    synthesized one-paragraph answer over them, so a test with coverage gets a
+    cited answer. Knobs let a test force the other branches:
+
+      * `abstain=True` — the answerer abstains even with evidence.
+      * `cite_ids=[...]` — cite exactly these ids (e.g. `[]` to exercise the
+        cite-or-abstain backstop; an id never retrieved to exercise grounding).
+      * `extra_claim_ids=[...]` — cite the retrieved Claims *plus* these, so a test
+        can assert a hallucinated id is dropped while the real ones survive.
+      * `text=...` — fix the prose.
+
+    Records each `(question, evidence)` it was asked, so a test can assert what
+    retrieval surfaced (e.g. that personal-layer context reached the answerer).
+    """
+
+    def __init__(
+        self,
+        *,
+        abstain: bool = False,
+        text: str | None = None,
+        cite_ids: list[int] | None = None,
+        extra_claim_ids: list[int] | None = None,
+    ):
+        self._abstain = abstain
+        self._text = text
+        self._cite_ids = cite_ids
+        self._extra = list(extra_claim_ids or [])
+        self.calls: list[tuple[str, RetrievedEvidence]] = []
+
+    def answer(self, question: str, evidence: RetrievedEvidence) -> GroundedAnswer:
+        self.calls.append((question, evidence))
+        if self._abstain:
+            return GroundedAnswer(text="", cited_claim_ids=[], abstained=True)
+        if self._cite_ids is not None:
+            ids = list(self._cite_ids)
+        else:
+            ids = [c.id for c in evidence.claims] + self._extra
+        text = self._text if self._text is not None else _synthesize(question, evidence)
+        return GroundedAnswer(text=text, cited_claim_ids=ids, abstained=False)
+
+
+def _synthesize(question: str, evidence: RetrievedEvidence) -> str:
+    """A canned synthesized answer woven from the retrieved Claims (not a list)."""
+    return "Based on your library: " + " ".join(c.text for c in evidence.claims)
 
 
 def _pad(values: list[float], dims: int) -> list[float]:

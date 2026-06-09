@@ -26,7 +26,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import config, creators, curation, personal, review
+from . import config, creators, curation, personal, query, review
+from .adapters.answerer import ClaudeQueryAnswerer
 from .adapters.embedder import OpenAIEmbedder
 from .adapters.youtube import YouTubeContentSource
 from .concepts import ConceptNormalizer
@@ -796,3 +797,53 @@ def detach_decision_link(
     if not removed:
         raise HTTPException(status_code=404, detail="link not found")
     return {"decision_id": decision_id, "unlinked": True}
+
+
+# == Natural-language query: grounded & cited (issue #17) ===================
+#
+# The primary way the owner *explores* the Body of Knowledge now that a visual
+# graph is out of v1 scope (ADR-0009, ADR-0011). A free-text question is embedded
+# (same Embedder as the admit pipeline), retrieval gathers the Claims/Protocols and
+# personal-layer context sharing a Concept with it, and the QueryAnswerer (Claude)
+# synthesizes an answer grounded only in that evidence — citing the specific Claims,
+# each clickable through to its Source and locator, or abstaining honestly. The
+# grounding and cite-or-abstain guarantees live in the `query` service, not here.
+
+
+class Question(BaseModel):
+    """The owner's free-text question for grounded query (ADR-0011)."""
+
+    question: str
+
+
+@app.post("/api/query")
+def ask(body: Question) -> dict:
+    """Answer a free-text question, grounded in and cited to the owner's library."""
+    with _repo() as repo:
+        answer = query.answer_question(
+            body.question,
+            embedder=OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            answerer=ClaudeQueryAnswerer(
+                config.anthropic_api_key(), config.query_model()
+            ),
+            repo=repo,
+            model=config.embedding_model(),
+            concept_limit=config.query_concept_limit(),
+            max_distance=config.query_max_distance(),
+            evidence_limit=config.query_evidence_limit(),
+        )
+    return {
+        "question": body.question,
+        "answer": answer.text,
+        "abstained": answer.abstained,
+        "citations": [
+            {
+                "claim_id": c.claim_id,
+                "text": c.text,
+                "type": c.type,
+                "deep_link": c.deep_link,
+                "source_title": c.source_title,
+            }
+            for c in answer.citations
+        ],
+    }
