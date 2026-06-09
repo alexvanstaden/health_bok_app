@@ -7,11 +7,14 @@ without any network — while Postgres stays real (PRD #1 testing decisions).
 
 from __future__ import annotations
 
+import hashlib
+
 from health_bok.models import (
     CandidateMetadata,
     CreatorIdentity,
     CreatorResolutionError,
     Digest,
+    Extraction,
     FetchedAudio,
     FetchedTranscript,
     TranscriptSegment,
@@ -148,3 +151,59 @@ class FakeDigestSender:
             self._remaining_failures -= 1
             raise RuntimeError("digest send failed")
         self.sent.append(digest)
+
+
+class FakeExtractor:
+    """Fakes the Extractor port (Part 2): returns a canned Extraction, or raises.
+
+    Drives the admit pipeline without the Claude API. Pass an `Extraction` to
+    yield, or an `error` to raise so a failing extraction can be exercised
+    (Candidate → `failed`, retryable). Records the video_ids it extracted.
+    """
+
+    def __init__(self, extraction: Extraction | None = None, *, error: Exception | None = None):
+        self._extraction = extraction if extraction is not None else Extraction()
+        self._error = error
+        self.extracted: list[str] = []
+
+    def extract(self, transcript: FetchedTranscript) -> Extraction:
+        self.extracted.append(transcript.provenance.video_id)
+        if self._error is not None:
+            raise self._error
+        return self._extraction
+
+
+class FakeEmbedder:
+    """Fakes the Embedder port (Part 2): emits controlled 1536-d vectors.
+
+    `vectors` maps a mention's text to its leading coordinates; the rest are
+    zero-padded to 1536, so a test can place mentions at chosen cosine distances
+    over real pgvector and assert merge-vs-new at the normalization threshold. An
+    unmapped text gets a deterministic, distinct, non-zero vector derived from its
+    hash, so independent mentions never collide by accident.
+    """
+
+    DIMS = 1536
+
+    def __init__(self, vectors: dict[str, list[float]] | None = None):
+        self._vectors = {k: list(v) for k, v in (vectors or {}).items()}
+        self.embedded: list[str] = []
+
+    def embed(self, text: str) -> list[float]:
+        self.embedded.append(text)
+        if text in self._vectors:
+            return _pad(self._vectors[text], self.DIMS)
+        return _hash_vector(text, self.DIMS)
+
+
+def _pad(values: list[float], dims: int) -> list[float]:
+    return [float(x) for x in values] + [0.0] * (dims - len(values))
+
+
+def _hash_vector(text: str, dims: int) -> list[float]:
+    """A stable, non-zero unit-ish vector seeded by the text's digest."""
+    digest = hashlib.sha256(text.encode()).digest()
+    # Spread the digest bytes across the leading coordinates; keep it non-zero so
+    # pgvector's cosine ops are well-defined.
+    head = [(b / 255.0) + 0.001 for b in digest[:16]]
+    return _pad(head, dims)

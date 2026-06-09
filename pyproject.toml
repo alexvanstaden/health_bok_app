@@ -17,6 +17,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The Web App's HTTP API backend (ADR-0009). Installed in the `api` container;
+# the daily pipeline and worker do not need it.
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
 dev = [
     "pytest>=8.0",
     "testcontainers[postgres]>=4.0",

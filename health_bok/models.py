@@ -131,13 +131,105 @@ class CandidateMetadata:
         return f"{YOUTUBE_WATCH}{self.video_id}"
 
 
+def locator_url(video_url: str, locator_seconds: int) -> str:
+    """A deep-link back to the exact moment a Claim/Protocol was asserted.
+
+    The Source's canonical watch URL plus a `&t=NNNs` offset (ADR-0010, PRD #1
+    user story 12), so the owner can jump straight to the evidence in context.
+    """
+    return f"{video_url}&t={locator_seconds}s"
+
+
+@dataclass(frozen=True)
+class ConceptMention:
+    """A proposed reference to a Concept, as named by the Extractor.
+
+    The raw mention text (e.g. "apoB", "zone 2 cardio") before normalization —
+    the worker resolves it to an existing Concept or mints a new one (ADR-0008).
+    `kind` is the Extractor's optional hint (supplement, mechanism…) used only
+    when a *new* Concept is created.
+    """
+
+    name: str
+    kind: str | None = None
+
+
+@dataclass(frozen=True)
+class ExtractedClaim:
+    """One load-bearing Claim the Extractor drew from a Transcript (ADR-0010).
+
+    `locator_seconds` grounds the Claim to the moment it was asserted; a Claim the
+    Extractor could not ground carries ``None`` and is *dropped* at admit time,
+    never smoothed over (ADR-0010 "grounded or dropped"). Scope qualifiers ("in
+    mice", "at 5g/day") stay verbatim in `text` (ADR-0002). Sub-kind is a `type`.
+    """
+
+    text: str
+    locator_seconds: int | None = None
+    type: str = "finding"  # mechanism | principle | finding
+    concepts: list[ConceptMention] = field(default_factory=list)
+
+    @property
+    def is_grounded(self) -> bool:
+        return self.locator_seconds is not None
+
+
+@dataclass(frozen=True)
+class ExtractedProtocol:
+    """A recommendation the Extractor drew from a Transcript (ADR-0010).
+
+    Only admitted as a Protocol when *structured* — carrying at least one of
+    dose/timing/frequency/duration alongside the action. An unstructured one is
+    vague advice and is demoted to a Claim at admit time, never stored as a
+    Protocol (ADR-0010, CONTEXT.md "Protocol").
+    """
+
+    action: str
+    locator_seconds: int | None = None
+    dose: str | None = None
+    timing: str | None = None
+    frequency: str | None = None
+    duration: str | None = None
+    concepts: list[ConceptMention] = field(default_factory=list)
+
+    @property
+    def is_structured(self) -> bool:
+        """Whether it carries enough structure to be a Protocol, not a Claim."""
+        return any((self.dose, self.timing, self.frequency, self.duration))
+
+    @property
+    def is_grounded(self) -> bool:
+        return self.locator_seconds is not None
+
+
+@dataclass(frozen=True)
+class Extraction:
+    """What an Extractor pulled from one Transcript: Claims + Protocols.
+
+    The precision-first yield over a single Source (ADR-0010): the substantive
+    assertions a creator actually argues, each grounded and qualifier-preserving,
+    plus their proposed Concept mentions. The admit step turns this into persisted
+    Claims, Protocols, Concepts, and edges.
+    """
+
+    claims: list[ExtractedClaim] = field(default_factory=list)
+    protocols: list[ExtractedProtocol] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class DigestItem:
-    """One video's entry in the Digest: its Summary and a link to the source."""
+    """One video's entry in the Digest: its Summary and a link to the source.
+
+    `webapp_url` deep-links into the Web App, where the owner actually reviews and
+    approves the Candidate — the Digest is only the notification that nudges them
+    there (ADR-0007). It is optional so the daily job still assembles a Digest
+    when no Web App base URL is configured.
+    """
 
     title: str
     url: str
     summary: str
+    webapp_url: str | None = None
 
 
 @dataclass(frozen=True)

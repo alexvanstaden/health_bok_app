@@ -1,0 +1,69 @@
+# The Web App stack (ADR-0009): Postgres + the Python HTTP API + the Next.js Web
+# App + the admission worker, plus the Part-1 daily pipeline as a scheduled
+# container. One Postgres is the only datastore (ADR-0003). Reachable only over
+# Tailscale — the tailnet is the auth boundary, no login screen (ADR-0009): bind
+# the published ports to your tailnet address, not 0.0.0.0, in production.
+#
+# Secrets come from a local .env (see .env.example); never commit the real one.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16  # Postgres + the `vector` extension (ADR-0008)
+    environment:
+      POSTGRES_USER: health
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-health}
+      POSTGRES_DB: health_bok
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U health -d health_bok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: ["uvicorn", "health_bok.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql://health:${POSTGRES_PASSWORD:-health}@db:5432/health_bok
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"  # bind to your tailnet IP in production
+
+  worker:
+    build: .
+    command: ["health-bok", "worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://health:${POSTGRES_PASSWORD:-health}@db:5432/health_bok
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ./web
+    environment:
+      # The browser reaches the API over the tailnet; override for your host.
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"  # bind to your tailnet IP in production
+
+  # The Part-1 daily pipeline as a scheduled container (ADR-0009): runs the job,
+  # then sleeps a day. Replaces the host cron/systemd timer. Set DIGEST_ENABLED
+  # and WEBAPP_BASE_URL in .env to control the notification email (ADR-0007).
+  pipeline:
+    build: .
+    command: ["sh", "-c", "while true; do health-bok run || true; sleep 86400; done"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://health:${POSTGRES_PASSWORD:-health}@db:5432/health_bok
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

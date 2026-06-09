@@ -15,7 +15,10 @@ from testcontainers.postgres import PostgresContainer
 
 from health_bok.db import init_schema
 
-POSTGRES_IMAGE = "postgres:16-alpine"
+# pgvector is required by the Part-2 knowledge schema (ADR-0008): the `vector`
+# extension and HNSW index don't exist in the stock Postgres image. This image
+# ships them, and is the same family deployed via docker-compose.
+POSTGRES_IMAGE = "pgvector/pgvector:pg16"
 
 
 def _psycopg3_url(raw_url: str) -> str:

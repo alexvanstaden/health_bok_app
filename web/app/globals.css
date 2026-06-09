@@ -1,0 +1,79 @@
+:root {
+  --bg: #0f1115;
+  --panel: #181b22;
+  --border: #272b35;
+  --text: #e6e8ec;
+  --muted: #9aa3b2;
+  --accent: #5b9dff;
+  --green: #3fb950;
+  --amber: #d29922;
+  --red: #f85149;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.5;
+}
+
+main { max-width: 880px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+a { color: var(--accent); }
+
+h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+.subtitle { color: var(--muted); margin-top: 0; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+}
+.card h2 { margin: 0 0 0.25rem; font-size: 1.15rem; }
+.card .summary { color: var(--muted); white-space: pre-wrap; }
+
+.row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+
+.badge {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.badge.candidate { color: var(--muted); }
+.badge.approved, .badge.processing { color: var(--amber); border-color: var(--amber); }
+.badge.admitted { color: var(--green); border-color: var(--green); }
+.badge.failed { color: var(--red); border-color: var(--red); }
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #20242d;
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #06122a; font-weight: 600; }
+button.danger:hover { border-color: var(--red); }
+
+.muted { color: var(--muted); }
+.claim { border-left: 2px solid var(--border); padding-left: 0.9rem; margin: 0.9rem 0; }
+.concepts { margin-top: 0.3rem; }
+.concept {
+  display: inline-block; font-size: 0.75rem; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 0.05rem 0.5rem; margin-right: 0.3rem;
+}
+.error { color: var(--red); }
