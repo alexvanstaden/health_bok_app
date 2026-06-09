@@ -13,12 +13,12 @@ The system is built in two parts:
   detects new uploads, archives immutable Transcripts in Postgres, summarizes them, and
   emails a Digest. **This README documents Part 1: what it does and how to run it.**
 - **Part 2 — the Web App & knowledge graph** (PRD issue #12; ADRs 0007–0011) — *in
-  progress; the first vertical is built.* The self-hosted Web App is the primary
-  interface: the owner approves Candidates, extraction draws Claims and Protocols into
-  the Body of Knowledge, records the personal layer (Goals, Markers, Decisions), and
-  queries it all in grounded, cited natural language. Tracked in slices #13–18 —
-  **slice 8 (issue #13), "Approve → Extract → See Claims", is now built** (see below);
-  the rest follow.
+  progress.* The self-hosted Web App is the primary interface: the owner approves
+  Candidates, extraction draws Claims and Protocols into the Body of Knowledge, records
+  the personal layer (Goals, Markers, Decisions), and queries it all in grounded, cited
+  natural language. Tracked in slices #13–18 — **slice 8 (issue #13), "Approve → Extract
+  → See Claims", and slice 9 (issue #14), "Browse & edit the Body of Knowledge", are now
+  built** (see below); the rest follow.
 
 ## Status
 
@@ -96,8 +96,29 @@ boundary. In it the owner sees each daily **Candidate** with its Summary and can
 
 The daily **Digest** is demoted to a notification that deep-links into the Web App review
 queue; set `DIGEST_ENABLED=false` and the system stays fully usable with email off
-(ADR-0007). The personal layer (Goals, Markers, Decisions), graph browsing/editing, and
-grounded natural-language query are the remaining Part-2 slices (#14–18).
+(ADR-0007).
+
+**Slice 9 — Browse & edit the Body of Knowledge (issue #14).** The admitted evidence
+layer is now browsable and editable in the Web App — no visual graph (ADR-0009), the
+connections are followed by navigation. The owner can:
+
+- **Browse** filterable lists of **Claims** (by sub-kind and by referenced Concept),
+  **Protocols** (by action and Concept), and **Concepts** (by name) — reachable from the
+  top nav.
+- **Follow connections** by clicking: a Claim links to the Concepts it references and the
+  Protocols it supports; a Protocol links to the Claims that justify it and its Concepts;
+  a Concept links to everything that references it — all by traversing the `edges`
+  (ADR-0008), with each Claim/Protocol keeping its locator deep-link back into the source.
+- **Edit or delete in place** (ADR-0010): every admitted Claim and Protocol can be
+  corrected or removed directly while browsing — curation continues opportunistically
+  rather than via a standing review queue. A delete also clears the edges that hung off
+  the entity, so none dangle.
+- An **owner edit is a protected version** (ADR-0005/0010): editing flags the Claim or
+  Protocol `protected`, the hook a later re-extraction supersede pass reads so it never
+  silently clobbers a hand-correction. (Re-extraction itself is a later slice.)
+
+The personal layer (Goals, Markers, Decisions) and grounded natural-language query are
+the remaining Part-2 slices (#15–18).
 
 ## Architecture
 
@@ -137,12 +158,13 @@ health_bok/
 ├── review.py        owner-driven Candidate transitions: approve · reject · retry (Part 2)
 ├── admit.py         extract → ground/structure → normalize Concepts → auto-admit (Part 2)
 ├── concepts.py      ConceptNormalizer: embed → nearest via pgvector → merge/new (Part 2)
+├── curation.py      in-place edit/delete of admitted Claims & Protocols; edit-protection (Part 2)
 ├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle (Part 2)
-├── api.py           FastAPI HTTP API the Web App calls (Part 2)
+├── api.py           FastAPI HTTP API the Web App calls: review queue + BoK browse/edit (Part 2)
 ├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `creators …`
 └── adapters/        youtube · whisper · claude · resend · extractor · embedder
 
-web/                 the Next.js Web App (review queue + claims view) — Part 2
+web/                 the Next.js Web App — review queue + BoK browser (Claims/Protocols/Concepts) — Part 2
 Dockerfile           Python image: API · worker · scheduled pipeline (one image, three commands)
 docker-compose.yml   db (pgvector) · api · worker · web · pipeline — the Part-2 stack
 deploy/              cron + systemd units (the Part-1 host-scheduling alternative)
@@ -227,6 +249,12 @@ so there is no login screen). The flow:
    Protocols, each with its Concepts and a locator deep-link into the video.
 4. **Reject** removes a Candidate from the queue; if extraction **failed**,
    **Retry** re-runs it.
+5. **Browse the Body of Knowledge** from the top nav — filterable lists of
+   **Claims**, **Protocols**, and **Concepts**. Open any of them to follow its
+   connections (a Claim's referenced Concepts and supported Protocols; a Protocol's
+   justifying Claims; everything that references a Concept), and **edit or delete**
+   any Claim or Protocol in place. An edit is marked a *protected version* so a
+   later re-extraction won't overwrite your correction (ADR-0005/0010).
 
 The worker and pipeline read the same `.env`; the worker needs the LLM keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) to extract and embed. The HTTP API can
@@ -319,6 +347,13 @@ edges integrity trigger rejects dangling endpoints and the unique constraint ded
 re-asserts; `test_review.py` covers approve/reject queue effects; `test_email_demotion.py`
 covers the email off-switch and the Web App deep-link; `test_extractor_parsing.py`
 is a pure unit test of the extractor's JSON contract.
+
+Part 2 (issue #14): `test_bok_browse.py` drives Browse & edit the Body of Knowledge —
+starting from a genuinely admitted Candidate it asserts the filterable lists, the detail
+views resolving connections both ways over `edges` (a Claim's supported Protocols, a
+Protocol's justifying Claims, a Concept's referencing entities), an in-place edit that
+persists and flags the entity `protected`, the structure CHECK surviving an edit, and a
+delete that removes the entity and clears its otherwise-dangling edges.
 
 ```bash
 source .venv/bin/activate    # after: pip install -e ".[dev]"

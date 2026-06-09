@@ -123,9 +123,15 @@ CREATE TABLE IF NOT EXISTS claims (
     type            TEXT        NOT NULL DEFAULT 'finding'
                                 CHECK (type IN ('mechanism', 'principle', 'finding')),
     locator_seconds INTEGER     NOT NULL CHECK (locator_seconds >= 0),
+    -- An owner edit in the Web App makes a Claim a *protected version*, not raw
+    -- extractor output: a later re-extraction supersede pass (ADR-0005) must read
+    -- this flag and not silently clobber it (ADR-0010). Auto-admitted Claims are
+    -- unprotected; the in-place edit sets it (issue #14).
+    protected       BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS claims_by_video ON claims (video_id);
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS protected BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- A Protocol: a parameterized recommendation with structure — action plus at
 -- least one of dose/timing/frequency/duration (CONTEXT.md, ADR-0010). Vague
@@ -141,11 +147,15 @@ CREATE TABLE IF NOT EXISTS protocols (
     frequency       TEXT,
     duration        TEXT,
     locator_seconds INTEGER     NOT NULL CHECK (locator_seconds >= 0),
+    -- Like a Claim, an owner-edited Protocol is a protected version (ADR-0010);
+    -- re-extraction (ADR-0005) must not overwrite it (issue #14).
+    protected       BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (dose IS NOT NULL OR timing IS NOT NULL
            OR frequency IS NOT NULL OR duration IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS protocols_by_video ON protocols (video_id);
+ALTER TABLE protocols ADD COLUMN IF NOT EXISTS protected BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- The one polymorphic edges table: every genuinely graph-shaped relationship —
 -- the many:many, computed, or traversable ones — lives here (ADR-0008).

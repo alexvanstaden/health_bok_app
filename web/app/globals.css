@@ -77,3 +77,77 @@ button.danger:hover { border-color: var(--red); }
   padding: 0.05rem 0.5rem; margin-right: 0.3rem;
 }
 .error { color: var(--red); }
+
+/* -- Body of Knowledge browser (issue #14) -------------------------------- */
+
+.nav {
+  display: flex;
+  gap: 1.25rem;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding-bottom: 0.75rem;
+  font-weight: 500;
+}
+.nav a:hover { color: var(--text); }
+
+.badge.protected, .badge.edited {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.filters { margin: 1rem 0; gap: 0.4rem; }
+.filters button.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+input, select, textarea {
+  font: inherit;
+  background: #20242d;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.search { width: 100%; max-width: 22rem; }
+
+.list-item {
+  display: block;
+  text-decoration: none;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  margin: 0.6rem 0;
+}
+.list-item:hover { border-color: var(--accent); }
+.list-item .meta { color: var(--muted); font-size: 0.85rem; margin-top: 0.3rem; }
+
+.form { display: grid; gap: 0.6rem; margin: 1rem 0; }
+.form label { display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); }
+.form .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+
+.connections { margin: 1rem 0; }
+.connections h3 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+.link-pill {
+  display: inline-block;
+  text-decoration: none;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+  margin: 0 0.3rem 0.3rem 0;
+}
+.link-pill:hover { border-color: var(--accent); }
+.crumb { color: var(--muted); }

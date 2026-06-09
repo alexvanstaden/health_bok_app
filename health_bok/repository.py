@@ -8,7 +8,7 @@ half-archived video, keeping the job idempotent and crash-safe (user story 22).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 import psycopg
@@ -100,6 +100,97 @@ class AdmittedProtocol:
     concepts: list[str]
 
 
+# -- Body-of-Knowledge browser shapes (issue #14) ---------------------------
+#
+# The browsable, editable evidence layer (ADR-0009 "no visual graph"): list and
+# detail reads over the typed entity tables, with connections resolved by
+# traversing `edges` (ADR-0008). A detail view carries the *other* end of each
+# connection as a lightweight ref the Web App turns into a navigable link, so the
+# owner follows Claim → Protocol → Concept by clicking, not by reading a graph.
+
+
+@dataclass(frozen=True)
+class ConceptRef:
+    """A Concept as the far end of a connection: enough to label and link to it."""
+
+    id: int
+    name: str
+
+
+@dataclass(frozen=True)
+class ClaimRef:
+    """A Claim as the far end of a connection (its text labels the link)."""
+
+    id: int
+    text: str
+
+
+@dataclass(frozen=True)
+class ProtocolRef:
+    """A Protocol as the far end of a connection (its action labels the link)."""
+
+    id: int
+    action: str
+
+
+@dataclass(frozen=True)
+class BokClaim:
+    """A Claim in the BoK browser: its text, sub-kind, provenance + locator
+    deep-link, the `protected` flag, and the Concepts it references. A *detail*
+    read additionally fills `supports` — the Protocols this Claim justifies
+    (ADR-0008 `claim → protocol supports`); list reads leave it empty.
+    """
+
+    id: int
+    text: str
+    type: str
+    locator_seconds: int
+    deep_link: str
+    protected: bool
+    source_video_id: str
+    source_title: str
+    concepts: list[ConceptRef]
+    supports: list[ProtocolRef] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class BokProtocol:
+    """A Protocol in the BoK browser: its structured parameters, provenance +
+    locator deep-link, the `protected` flag, and referenced Concepts. A *detail*
+    read fills `justified_by` — the Claims that support it; list reads leave it
+    empty.
+    """
+
+    id: int
+    action: str
+    dose: str | None
+    timing: str | None
+    frequency: str | None
+    duration: str | None
+    locator_seconds: int
+    deep_link: str
+    protected: bool
+    source_video_id: str
+    source_title: str
+    concepts: list[ConceptRef]
+    justified_by: list[ClaimRef] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class BokConcept:
+    """A Concept hub node in the BoK browser. List reads carry only
+    `reference_count` (how many Claims + Protocols point at it); a *detail* read
+    fills `claims` and `protocols` — everything that references it (ADR-0008).
+    """
+
+    id: int
+    name: str
+    kind: str | None
+    reference_count: int
+    claims: list[ClaimRef] = field(default_factory=list)
+    protocols: list[ProtocolRef] = field(default_factory=list)
+
+
 def _vector_literal(embedding: list[float]) -> str:
     """Render a Python vector as a pgvector text literal (cast `::vector` in SQL).
 
@@ -108,6 +199,72 @@ def _vector_literal(embedding: list[float]) -> str:
     format leaking into the queries.
     """
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+
+
+def _concept_refs_sql(src_type: str, src_id_expr: str) -> str:
+    """A scalar subquery yielding a row's referenced Concepts as a JSON array.
+
+    The `references` edges from one Claim/Protocol to its Concepts, rolled up into
+    `[{"id":…,"name":…}]` so a list read needs no N+1 follow-ups. `src_type` and
+    `src_id_expr` are fixed literals the caller controls (`'claim'`/`'protocol'`,
+    `cl.id`/`p.id`), never user input — no injection surface.
+    """
+    return (
+        "COALESCE((SELECT json_agg("
+        "json_build_object('id', c.id, 'name', c.name) ORDER BY c.name) "
+        "FROM edges e JOIN concepts c ON c.id = e.dst_id "
+        f"WHERE e.src_type = '{src_type}' AND e.src_id = {src_id_expr} "
+        "AND e.dst_type = 'concept' AND e.kind = 'references'), '[]'::json)"
+    )
+
+
+# The shared projections for Claim/Protocol browse reads: every column the
+# `BokClaim`/`BokProtocol` shapes need, including provenance (the Source's URL +
+# title) and the rolled-up referenced Concepts. List and detail reads bolt their
+# own WHERE/ORDER onto these so the column order the mappers below depend on stays
+# in one place.
+_CLAIM_SELECT = (
+    "SELECT cl.id, cl.text, cl.type, cl.locator_seconds, v.url, v.video_id, "
+    "v.title, cl.protected, " + _concept_refs_sql("claim", "cl.id") + " "
+    "FROM claims cl JOIN videos v ON v.video_id = cl.video_id"
+)
+_PROTOCOL_SELECT = (
+    "SELECT p.id, p.action, p.dose, p.timing, p.frequency, p.duration, "
+    "p.locator_seconds, v.url, v.video_id, v.title, p.protected, "
+    + _concept_refs_sql("protocol", "p.id") + " "
+    "FROM protocols p JOIN videos v ON v.video_id = p.video_id"
+)
+
+
+def _row_to_bok_claim(r) -> BokClaim:
+    return BokClaim(
+        id=r[0],
+        text=r[1],
+        type=r[2],
+        locator_seconds=r[3],
+        deep_link=locator_url(r[4], r[3]),
+        source_video_id=r[5],
+        source_title=r[6],
+        protected=r[7],
+        concepts=[ConceptRef(id=c["id"], name=c["name"]) for c in r[8]],
+    )
+
+
+def _row_to_bok_protocol(r) -> BokProtocol:
+    return BokProtocol(
+        id=r[0],
+        action=r[1],
+        dose=r[2],
+        timing=r[3],
+        frequency=r[4],
+        duration=r[5],
+        locator_seconds=r[6],
+        deep_link=locator_url(r[7], r[6]),
+        source_video_id=r[8],
+        source_title=r[9],
+        protected=r[10],
+        concepts=[ConceptRef(id=c["id"], name=c["name"]) for c in r[11]],
+    )
 
 
 @dataclass(frozen=True)
@@ -689,6 +846,263 @@ class Repository:
                 )
                 for r in cur.fetchall()
             ]
+
+    # == Body of Knowledge: browse, detail & in-place curation (issue #14) ====
+    #
+    # The browsable, editable evidence layer (ADR-0009, ADR-0010). Reads list and
+    # open Claims/Protocols/Concepts and resolve their connections over `edges`;
+    # writes edit a Claim/Protocol in place — flagging it a protected version so
+    # re-extraction won't clobber it (ADR-0005) — or delete it and the edges that
+    # hang off it. As elsewhere, these do not commit: the caller owns the boundary.
+
+    # -- browse & detail (reads) ---------------------------------------------
+
+    def list_claims(
+        self, *, concept_id: int | None = None, type: str | None = None
+    ) -> list[BokClaim]:
+        """Every admitted Claim for the BoK browser, newest first; filterable.
+
+        Optionally narrowed to Claims referencing a given Concept and/or of a
+        given sub-kind, so the owner can slice the evidence layer while browsing
+        (issue #14). Each Claim carries its provenance, locator deep-link, and
+        referenced Concepts; `supports` is left for the detail read.
+        """
+        where: list[str] = []
+        params: dict = {}
+        if concept_id is not None:
+            where.append(
+                "EXISTS (SELECT 1 FROM edges e2 WHERE e2.src_type = 'claim' "
+                "AND e2.src_id = cl.id AND e2.dst_type = 'concept' "
+                "AND e2.dst_id = %(concept_id)s AND e2.kind = 'references')"
+            )
+            params["concept_id"] = concept_id
+        if type is not None:
+            where.append("cl.type = %(type)s")
+            params["type"] = type
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                _CLAIM_SELECT + clause + " ORDER BY cl.created_at DESC, cl.id DESC",
+                params,
+            )
+            return [_row_to_bok_claim(r) for r in cur.fetchall()]
+
+    def get_claim(self, claim_id: int) -> BokClaim | None:
+        """One admitted Claim with its connections, or ``None`` if it's gone.
+
+        Fills `supports` — the Protocols this Claim justifies (`claim → protocol
+        supports`, ADR-0008) — so the detail view can link to them. The referenced
+        Concepts come back on the base read.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(_CLAIM_SELECT + " WHERE cl.id = %s", (claim_id,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            claim = _row_to_bok_claim(row)
+            cur.execute(
+                "SELECT p.id, p.action FROM edges e JOIN protocols p ON p.id = e.dst_id "
+                "WHERE e.src_type = 'claim' AND e.src_id = %s "
+                "AND e.dst_type = 'protocol' AND e.kind = 'supports' "
+                "ORDER BY p.action, p.id",
+                (claim_id,),
+            )
+            supports = [ProtocolRef(id=r[0], action=r[1]) for r in cur.fetchall()]
+        return replace(claim, supports=supports)
+
+    def list_protocols(self, *, concept_id: int | None = None) -> list[BokProtocol]:
+        """Every admitted Protocol for the BoK browser, newest first; filterable
+        by referenced Concept. Each carries its structured parameters, provenance,
+        locator deep-link, and Concepts; `justified_by` is left for the detail read.
+        """
+        where = ""
+        params: dict = {}
+        if concept_id is not None:
+            where = (
+                " WHERE EXISTS (SELECT 1 FROM edges e2 WHERE e2.src_type = 'protocol' "
+                "AND e2.src_id = p.id AND e2.dst_type = 'concept' "
+                "AND e2.dst_id = %(concept_id)s AND e2.kind = 'references')"
+            )
+            params["concept_id"] = concept_id
+        with self._conn.cursor() as cur:
+            cur.execute(
+                _PROTOCOL_SELECT + where + " ORDER BY p.created_at DESC, p.id DESC",
+                params,
+            )
+            return [_row_to_bok_protocol(r) for r in cur.fetchall()]
+
+    def get_protocol(self, protocol_id: int) -> BokProtocol | None:
+        """One admitted Protocol with its connections, or ``None`` if it's gone.
+
+        Fills `justified_by` — the Claims that support it — so the detail view can
+        show and link to the evidence behind the recommendation (CONTEXT.md
+        "Protocol"; ADR-0008).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(_PROTOCOL_SELECT + " WHERE p.id = %s", (protocol_id,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            protocol = _row_to_bok_protocol(row)
+            cur.execute(
+                "SELECT cl.id, cl.text FROM edges e JOIN claims cl ON cl.id = e.src_id "
+                "WHERE e.dst_type = 'protocol' AND e.dst_id = %s "
+                "AND e.src_type = 'claim' AND e.kind = 'supports' "
+                "ORDER BY cl.id",
+                (protocol_id,),
+            )
+            justified_by = [ClaimRef(id=r[0], text=r[1]) for r in cur.fetchall()]
+        return replace(protocol, justified_by=justified_by)
+
+    def list_concepts(self, *, kind: str | None = None) -> list[BokConcept]:
+        """Every Concept hub node, alphabetical; optionally filtered by kind.
+
+        Each carries a `reference_count` of the Claims + Protocols that reference
+        it, so the browser can show how load-bearing a Concept is at a glance.
+        """
+        where = ""
+        params: dict = {}
+        if kind is not None:
+            where = " WHERE c.kind = %(kind)s"
+            params["kind"] = kind
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.id, c.name, c.kind, "
+                "  (SELECT count(*) FROM edges e WHERE e.dst_type = 'concept' "
+                "   AND e.dst_id = c.id AND e.kind = 'references') "
+                "FROM concepts c" + where + " ORDER BY c.name, c.id",
+                params,
+            )
+            return [
+                BokConcept(id=r[0], name=r[1], kind=r[2], reference_count=r[3])
+                for r in cur.fetchall()
+            ]
+
+    def get_concept(self, concept_id: int) -> BokConcept | None:
+        """One Concept with everything that references it, or ``None`` if gone.
+
+        Fills `claims` and `protocols` by walking the inbound `references` edges,
+        so the owner can pivot from a Concept to all the evidence touching it — the
+        relatedness-by-shared-Concept traversal, without a visual graph (ADR-0009).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, name, kind FROM concepts WHERE id = %s", (concept_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cur.execute(
+                "SELECT cl.id, cl.text FROM edges e JOIN claims cl ON cl.id = e.src_id "
+                "WHERE e.dst_type = 'concept' AND e.dst_id = %s "
+                "AND e.src_type = 'claim' AND e.kind = 'references' "
+                "ORDER BY cl.id",
+                (concept_id,),
+            )
+            claims = [ClaimRef(id=r[0], text=r[1]) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT p.id, p.action FROM edges e JOIN protocols p ON p.id = e.src_id "
+                "WHERE e.dst_type = 'concept' AND e.dst_id = %s "
+                "AND e.src_type = 'protocol' AND e.kind = 'references' "
+                "ORDER BY p.action, p.id",
+                (concept_id,),
+            )
+            protocols = [ProtocolRef(id=r[0], action=r[1]) for r in cur.fetchall()]
+        return BokConcept(
+            id=row[0],
+            name=row[1],
+            kind=row[2],
+            reference_count=len(claims) + len(protocols),
+            claims=claims,
+            protocols=protocols,
+        )
+
+    # -- in-place edit & delete (writes) -------------------------------------
+
+    def update_claim(
+        self, claim_id: int, *, text: str, type: str, locator_seconds: int
+    ) -> bool:
+        """Apply an owner edit to a Claim and mark it a protected version (ADR-0010).
+
+        Returns whether the Claim existed. Setting `protected` *here* makes the
+        invariant unbreakable: every in-place edit flows through this one write, so
+        a later re-extraction supersede (ADR-0005) can trust the flag and never
+        silently clobber a hand-corrected Claim.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE claims SET text = %s, type = %s, locator_seconds = %s, "
+                "protected = TRUE WHERE id = %s",
+                (text, type, locator_seconds, claim_id),
+            )
+            return cur.rowcount > 0
+
+    def update_protocol(
+        self,
+        protocol_id: int,
+        *,
+        action: str,
+        dose: str | None,
+        timing: str | None,
+        frequency: str | None,
+        duration: str | None,
+        locator_seconds: int,
+    ) -> bool:
+        """Apply an owner edit to a Protocol and mark it protected (ADR-0010).
+
+        Returns whether the Protocol existed. The DB still enforces the structure
+        CHECK (at least one of dose/timing/frequency/duration), so an edit that
+        strips a Protocol bare fails loudly rather than admitting vague advice.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE protocols SET action = %s, dose = %s, timing = %s, "
+                "frequency = %s, duration = %s, locator_seconds = %s, "
+                "protected = TRUE WHERE id = %s",
+                (action, dose, timing, frequency, duration, locator_seconds, protocol_id),
+            )
+            return cur.rowcount > 0
+
+    def delete_claim(self, claim_id: int) -> bool:
+        """Delete a Claim and the edges/embeddings hanging off it (issue #14).
+
+        `edges` endpoints are polymorphic, not FKs, so there is no cascade, and the
+        integrity trigger only guards INSERT/UPDATE — a delete must clear the
+        Claim's own edges (as either endpoint) itself or they would dangle. Returns
+        whether the Claim existed.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM edges WHERE (src_type = 'claim' AND src_id = %(id)s) "
+                "OR (dst_type = 'claim' AND dst_id = %(id)s)",
+                {"id": claim_id},
+            )
+            cur.execute(
+                "DELETE FROM embeddings WHERE owner_type = 'claim' AND owner_id = %s",
+                (claim_id,),
+            )
+            cur.execute("DELETE FROM claims WHERE id = %s", (claim_id,))
+            return cur.rowcount > 0
+
+    def delete_protocol(self, protocol_id: int) -> bool:
+        """Delete a Protocol and the edges/embeddings hanging off it (issue #14).
+
+        Clears both its outbound `references` edges to Concepts and the inbound
+        `supports` edges from Claims, so no dangling edge survives the delete.
+        Returns whether the Protocol existed.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM edges WHERE (src_type = 'protocol' AND src_id = %(id)s) "
+                "OR (dst_type = 'protocol' AND dst_id = %(id)s)",
+                {"id": protocol_id},
+            )
+            cur.execute(
+                "DELETE FROM embeddings WHERE owner_type = 'protocol' AND owner_id = %s",
+                (protocol_id,),
+            )
+            cur.execute("DELETE FROM protocols WHERE id = %s", (protocol_id,))
+            return cur.rowcount > 0
 
     # -- helpers -------------------------------------------------------------
 
