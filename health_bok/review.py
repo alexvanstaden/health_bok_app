@@ -61,6 +61,22 @@ def reject_candidate(video_id: str, *, repo: Repository) -> bool:
     return True
 
 
+def bulk_reject(video_ids: list[str], *, repo: Repository) -> int:
+    """Reject many Candidates at once and return how many were rejected.
+
+    The owner's bulk "this is noise" gesture over the backfill queue (issue #15):
+    obvious irrelevant back-catalogue Candidates are cleared in one go instead of
+    one at a time. Each is rejected with the same rule as `reject_candidate` — an
+    already-admitted one is skipped — so a rejected backfill Candidate leaves the
+    queue and re-running backfill won't resurface it.
+    """
+    rejected = 0
+    for video_id in video_ids:
+        if reject_candidate(video_id, repo=repo):
+            rejected += 1
+    return rejected
+
+
 def retry_candidate(video_id: str, *, repo: Repository) -> bool:
     """Re-enqueue a Candidate whose extraction failed (ADR-0010).
 

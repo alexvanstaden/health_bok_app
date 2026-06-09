@@ -16,10 +16,9 @@ import pytest
 
 from health_bok import curation, review
 from health_bok.repository import Repository
-from health_bok.worker import drain
 from tests.fakes import FakeExtractor
 from tests.seed import seed_processed_video
-from tests.test_admission import RAPAMYCIN_CLAIM, make_extraction, normalizer
+from tests.test_admission import RAPAMYCIN_CLAIM, drain_daily, make_extraction
 
 VIDEO_ID = "vid_bok"
 SOURCE_TITLE = "Zone 2 Cardio Explained"  # the seeded video's title
@@ -30,11 +29,7 @@ def _admit(repo: Repository) -> None:
     """Seed a processed daily Candidate and admit it via the real slice-8 path."""
     seed_processed_video(repo, video_id=VIDEO_ID, title=SOURCE_TITLE)
     review.approve_candidate(VIDEO_ID, repo=repo)
-    drain(
-        extractor=FakeExtractor(make_extraction()),
-        normalizer=normalizer(repo),
-        repo=repo,
-    )
+    drain_daily(FakeExtractor(make_extraction()), repo)
 
 
 def _claims_by_text(repo: Repository) -> dict:

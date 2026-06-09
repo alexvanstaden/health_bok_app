@@ -242,14 +242,24 @@ published ports to your **Tailscale** address — the tailnet is the auth bounda
 so there is no login screen). The flow:
 
 1. The home page is the **review queue**: each daily Candidate with its Summary.
-2. **Approve** a Candidate — the API enqueues a job and returns immediately; the
+2. **Manage Creators** from the top nav — add by @handle or channel URL (resolved
+   once to a stable channel_id; an unresolvable reference fails loudly inline),
+   see each Creator's resolved channel name, **Backfill** its back-catalogue, or
+   remove it. No CLI needed to feed the pipeline (issue #15).
+3. **Backfill** (top nav) is the back-catalogue review queue: metadata-only
+   Candidates — thumbnail, title, description, publish date, link — with no preview
+   tier. Judge relevance at a glance, **bulk-reject** obvious noise (tick the boxes
+   → *Reject selected*), or **Approve** one. Approving runs the *same* pipeline as a
+   daily Candidate — the worker **transcribes-if-needed** (captions, else Whisper)
+   before extracting and admitting, since a backfill Candidate has no Transcript yet.
+4. **Approve** a Candidate — the API enqueues a job and returns immediately; the
    **worker** extracts Claims/Protocols, normalizes Concepts, and auto-admits,
    and you watch the badge walk `approved → processing → admitted`.
-3. **View extracted claims** on a Candidate to see its admitted Claims and
+5. **View extracted claims** on a Candidate to see its admitted Claims and
    Protocols, each with its Concepts and a locator deep-link into the video.
-4. **Reject** removes a Candidate from the queue; if extraction **failed**,
+6. **Reject** removes a Candidate from the queue; if extraction **failed**,
    **Retry** re-runs it.
-5. **Browse the Body of Knowledge** from the top nav — filterable lists of
+7. **Browse the Body of Knowledge** from the top nav — filterable lists of
    **Claims**, **Protocols**, and **Concepts**. Open any of them to follow its
    connections (a Claim's referenced Concepts and supported Protocols; a Protocol's
    justifying Claims; everything that references a Concept), and **edit or delete**
@@ -273,8 +283,11 @@ health-bok worker                        # drain the admission queue
 
 ## Manage Creators
 
-Maintain the watch list of Creators the system follows. These commands need only
-`DATABASE_URL` — not the Digest or Summarizer secrets.
+Maintain the watch list of Creators the system follows. The **Web App** is the
+primary way to do this (the *Creators* tab — add/list/remove and trigger a
+backfill; see [Run the Web App](#run-the-web-app-part-2)). The equivalent **CLI**
+is an ops/admin convenience and needs only `DATABASE_URL` — not the Digest or
+Summarizer secrets.
 
 ```bash
 health-bok creators add @hubermanlab                          # by @handle
@@ -292,10 +305,16 @@ changes its handle.
 
 Adding a Creator also **backfills** its recent back-catalogue as metadata-only
 **Candidates** (issue #7): every past upload published within `BACKFILL_CUTOFF_DAYS`
-(default ~2 years) is recorded by title, description, publish date, and URL — with
-no Transcript fetched and Whisper never called. These Candidates await the owner's
-approval into the Body of Knowledge — done in the **Web App** (Part 2), never email;
-re-adding a Creator only tops up newly-published ones.
+(default ~2 years) is recorded by thumbnail, title, description, publish date, and
+URL — with no Transcript fetched and Whisper never called. Re-adding a Creator, or
+hitting **Backfill** in the Web App, only tops up newly-published ones.
+
+These Candidates await the owner's approval into the Body of Knowledge — done in
+the **Web App** (the *Backfill* tab), never email. **Approving** a backfill
+Candidate is where transcribe-if-needed genuinely fires (issue #15): because it
+has no archived Transcript, the worker acquires one (free captions, else paid
+Whisper) and archives it before extraction → admission — the exact same pipeline a
+daily Candidate flows through. Obvious noise can be **bulk-rejected** instead.
 
 ## Schedule the daily job
 
@@ -354,6 +373,14 @@ views resolving connections both ways over `edges` (a Claim's supported Protocol
 Protocol's justifying Claims, a Concept's referencing entities), an in-place edit that
 persists and flags the entity `protected`, the structure CHECK surviving an edit, and a
 delete that removes the entity and clears its otherwise-dangling edges.
+
+Part 2 (issue #15): `test_backfill_admission.py` drives Creator management + backfill —
+add/list/remove a Creator (resolved channel name shown), an explicit backfill trigger
+that surfaces metadata-only Candidates (thumbnail and all), bulk-reject that removes them
+and keeps them from resurfacing, and — the heart of the slice — approving a backfill
+Candidate with no Transcript so the worker transcribes-if-needed (captions *and* the
+caption-less Whisper path) before extracting and admitting, plus the failed-then-retry
+path proving the archived Transcript survives and isn't re-transcribed.
 
 ```bash
 source .venv/bin/activate    # after: pip install -e ".[dev]"

@@ -23,7 +23,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .models import Digest, DigestItem, FetchedTranscript
+from .acquire import acquire_transcript
+from .models import Digest, DigestItem
 from .ports import ContentSource, DigestSender, Summarizer, Transcriber
 from .repository import Repository
 
@@ -180,32 +181,10 @@ def _process_video(
     "processed" only as a unit — a crash mid-way leaves nothing half-done, and a
     failed send later leaves the video processed but unsent (user stories 22, 24).
     """
-    fetched = _acquire_transcript(
+    fetched = acquire_transcript(
         video_id, content_source=content_source, transcriber=transcriber
     )
     repo.archive_transcript(fetched, retrieved_at=now())
     summary = summarizer.summarize(fetched)
     repo.save_summary(video_id, summary, model=model, summarized_at=now())
     repo.commit()
-
-
-def _acquire_transcript(
-    video_id: str, *, content_source: ContentSource, transcriber: Transcriber
-) -> FetchedTranscript:
-    """Get the video's Transcript, preferring free captions over paid Whisper.
-
-    Free YouTube captions are used whenever they exist (user story 9); only their
-    genuine absence triggers downloading the audio and transcribing it via Whisper
-    (user story 10). Whichever path runs is recorded as the Transcript's `source`,
-    so reliability can be judged later (user story 32). This is the daily path —
-    backfill never acquires a Transcript at all, so Whisper never runs for it
-    (user story 29).
-    """
-    captioned = content_source.fetch_transcript(video_id)
-    if captioned is not None:
-        return captioned
-    audio = content_source.fetch_audio(video_id)
-    segments = transcriber.transcribe(audio)
-    return FetchedTranscript(
-        provenance=audio.provenance, segments=segments, source="whisper"
-    )

@@ -20,6 +20,7 @@ from .models import (
     Provenance,
     TranscriptSegment,
     locator_url,
+    thumbnail_url,
 )
 
 # The implicit lifecycle state of a daily Candidate that has no `admissions` row
@@ -272,7 +273,10 @@ class StoredCandidate:
     """A persisted backfill Candidate, read back for the approval queue / tests.
 
     Metadata only — no Transcript or Summary — carrying the Creator's stable
-    `channel_id` so a Candidate stays attributable to whom it was backfilled for.
+    `channel_id` (and `channel_name`, for the Web App's backfill queue) so a
+    Candidate stays attributable to whom it was backfilled for. `state` is the
+    Candidate's lifecycle state for the queue read — `candidate` until the owner
+    acts; `list_candidates` leaves it at that default.
     """
 
     video_id: str
@@ -281,6 +285,13 @@ class StoredCandidate:
     description: str
     url: str
     published_at: datetime
+    channel_name: str = ""
+    state: str = CANDIDATE
+
+    @property
+    def thumbnail_url(self) -> str:
+        """Thumbnail image URL, so the owner judges a backfill Candidate at a glance."""
+        return thumbnail_url(self.video_id)
 
 
 class Repository:
@@ -316,16 +327,29 @@ class Repository:
             )
             return [CreatorIdentity(channel_id=r[0], name=r[1]) for r in cur.fetchall()]
 
+    def creator_id(self, channel_id: str) -> int | None:
+        """The internal id of a watched Creator by its stable channel_id, or None.
+
+        Lets a Web App backfill trigger re-run population for one Creator without
+        re-resolving its @handle (issue #15).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT id FROM creators WHERE channel_id = %s", (channel_id,))
+            row = cur.fetchone()
+        return row[0] if row else None
+
     def list_candidates(self) -> list[StoredCandidate]:
         """Every stored backfill Candidate, newest published first.
 
-        The owner's approval queue reads this (a later slice); the backfill tests
-        assert on it to confirm only metadata is stored and the cutoff is honored.
+        The raw storage view — what backfill persisted, regardless of any later
+        owner decision. The backfill tests assert on it to confirm only metadata is
+        stored and the cutoff is honored; the Web App's review queue instead reads
+        `list_backfill_candidates`, which hides Candidates already acted on.
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT c.video_id, cr.channel_id, c.title, c.description, "
-                "       c.url, c.published_at "
+                "       c.url, c.published_at, cr.name "
                 "FROM candidates c JOIN creators cr ON cr.id = c.creator_id "
                 "ORDER BY c.published_at DESC, c.video_id"
             )
@@ -337,6 +361,43 @@ class Repository:
                     description=r[3],
                     url=r[4],
                     published_at=r[5],
+                    channel_name=r[6],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def list_backfill_candidates(self) -> list[StoredCandidate]:
+        """Backfill Candidates awaiting the owner's decision, newest published first.
+
+        The Web App's backfill review queue (issue #15): metadata-only Candidates
+        the owner can approve into the Body of Knowledge or bulk-reject. Mirrors
+        `list_daily_candidates`' filter — a Candidate shows until it is admitted or
+        rejected, and a `failed` one stays visible so it can be retried; approved
+        and processing ones show their in-flight state. Each carries its Creator's
+        name and current lifecycle `state`.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.video_id, cr.channel_id, c.title, c.description, c.url, "
+                "       c.published_at, cr.name, COALESCE(a.state, %s) AS state "
+                "FROM candidates c "
+                "JOIN creators cr ON cr.id = c.creator_id "
+                "LEFT JOIN admissions a ON a.video_id = c.video_id "
+                "WHERE COALESCE(a.state, %s) IN "
+                "      (%s, 'approved', 'processing', 'failed') "
+                "ORDER BY c.published_at DESC, c.video_id",
+                (CANDIDATE, CANDIDATE, CANDIDATE),
+            )
+            return [
+                StoredCandidate(
+                    video_id=r[0],
+                    channel_id=r[1],
+                    title=r[2],
+                    description=r[3],
+                    url=r[4],
+                    published_at=r[5],
+                    channel_name=r[6],
+                    state=r[7],
                 )
                 for r in cur.fetchall()
             ]

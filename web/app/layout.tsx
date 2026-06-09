@@ -17,6 +17,8 @@ export default function RootLayout({
       <body>
         <nav className="nav">
           <a href="/">Review queue</a>
+          <a href="/creators">Creators</a>
+          <a href="/backfill">Backfill</a>
           <a href="/claims">Claims</a>
           <a href="/protocols">Protocols</a>
           <a href="/concepts">Concepts</a>

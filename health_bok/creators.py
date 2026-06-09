@@ -52,6 +52,35 @@ def add_creator(
     return identity
 
 
+def backfill_creator(
+    channel_id: str,
+    *,
+    content_source: ContentSource,
+    repo: Repository,
+    cutoff: timedelta = DEFAULT_BACKFILL_CUTOFF,
+) -> list[str] | None:
+    """Re-run back-catalogue population for one already-watched Creator (issue #15).
+
+    Lets the owner trigger a backfill from the Web App, without the CLI — lists
+    the Creator's back-catalogue and stores any newly-seen uploads within `cutoff`
+    as metadata-only Candidates (idempotent on video_id), then commits. Returns the
+    video IDs newly stored this run, or ``None`` if no Creator with that channel_id
+    is on the watch list, so the caller can answer 404.
+    """
+    creator_id = repo.creator_id(channel_id)
+    if creator_id is None:
+        return None
+    stored = backfill_candidates(
+        creator_id,
+        channel_id,
+        content_source=content_source,
+        repo=repo,
+        cutoff=cutoff,
+    )
+    repo.commit()
+    return stored
+
+
 def remove_creator(channel_id: str, *, repo: Repository) -> bool:
     """Remove a Creator from the watch list by its stable channel_id.
 

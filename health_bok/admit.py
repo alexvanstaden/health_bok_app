@@ -3,8 +3,9 @@
 This is the heart of the "Approve → Extract → See Claims" vertical. Given a video
 the owner has approved, it:
 
-  1. reads the archived Transcript back (transcribe-if-needed for backfill
-     Candidates is a later slice — daily Candidates already have one),
+  1. reads the archived Transcript back (the worker has already acquired one
+     transcribe-if-needed for a backfill Candidate, issue #15; a daily Candidate
+     always had one),
   2. runs the `Extractor` over it,
   3. persists each Claim and Protocol with provenance and a locator deep-link,
      applying the extraction contract at the boundary (ADR-0010):
@@ -61,7 +62,7 @@ def admit_candidate(
     if transcript is None:
         raise AdmissionError(
             f"cannot admit {video_id!r}: no archived Transcript "
-            "(acquiring one for backfill Candidates is a later slice)"
+            "(the worker acquires one transcribe-if-needed before admitting)"
         )
 
     extraction = extractor.extract(transcript)

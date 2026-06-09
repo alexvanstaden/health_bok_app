@@ -11,6 +11,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 YOUTUBE_WATCH = "https://www.youtube.com/watch?v="
+# YouTube derives every video's thumbnail from its id, so a backfill Candidate can
+# show a thumbnail without storing one (issue #15) — it is computed, like `url`.
+YOUTUBE_THUMBNAIL = "https://i.ytimg.com/vi/"
+
+
+def thumbnail_url(video_id: str) -> str:
+    """The video's default thumbnail image URL, derived from its id (issue #15)."""
+    return f"{YOUTUBE_THUMBNAIL}{video_id}/hqdefault.jpg"
 
 
 class CreatorResolutionError(RuntimeError):
@@ -129,6 +137,11 @@ class CandidateMetadata:
     def url(self) -> str:
         """Canonical watch URL — the Candidate's citable link (CONTEXT.md)."""
         return f"{YOUTUBE_WATCH}{self.video_id}"
+
+    @property
+    def thumbnail_url(self) -> str:
+        """Thumbnail image URL, so a backfill Candidate is judgeable at a glance."""
+        return thumbnail_url(self.video_id)
 
 
 def locator_url(video_url: str, locator_seconds: int) -> str:
