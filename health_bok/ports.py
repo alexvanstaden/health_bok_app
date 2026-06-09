@@ -14,6 +14,7 @@ from .models import (
     CandidateMetadata,
     CreatorIdentity,
     Digest,
+    Extraction,
     FetchedAudio,
     FetchedTranscript,
     TranscriptSegment,
@@ -115,4 +116,35 @@ class DigestSender(Protocol):
 
     def send(self, digest: Digest) -> None:
         """Deliver the Digest. Never called with an empty Digest."""
+        ...
+
+
+@runtime_checkable
+class Extractor(Protocol):
+    """Pulls the Body-of-Knowledge layer out of a Transcript (ADR-0010).
+
+    The Part-2 seam added by this slice (the Claude API in production). Precision-
+    first: only the substantive, load-bearing assertions a creator actually
+    argues, each grounded to a locator and preserving scope qualifiers; vague
+    advice stays a Claim rather than becoming a Protocol. Kept behind its own port
+    so the admit pipeline can be driven in tests with a fake, no SDK in the
+    orchestrator (PRD #1 testing decisions).
+    """
+
+    def extract(self, transcript: FetchedTranscript) -> Extraction:
+        """Return the Claims and Protocols (with Concept mentions) of a Transcript."""
+        ...
+
+
+@runtime_checkable
+class Embedder(Protocol):
+    """Embeds text into a 1536-d vector for Concept normalization (ADR-0008).
+
+    OpenAI `text-embedding-3-small` in production. Behind its own seam so Concept
+    normalization runs in tests against a `FakeEmbedder` emitting controlled
+    vectors over a real pgvector, asserting merge-vs-new at the threshold.
+    """
+
+    def embed(self, text: str) -> list[float]:
+        """Return the embedding of `text` — a list of 1536 floats."""
         ...

@@ -16,5 +16,12 @@ env/
 .env
 .env.local
 
+# Node / Next.js (the Web App, ADR-0009)
+node_modules/
+web/.next/
+web/out/
+*.tsbuildinfo
+next-env.d.ts.bak
+
 # OS / editor
 .DS_Store

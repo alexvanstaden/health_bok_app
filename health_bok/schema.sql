@@ -83,3 +83,184 @@ DROP TRIGGER IF EXISTS transcripts_no_mutate ON transcripts;
 CREATE TRIGGER transcripts_no_mutate
     BEFORE UPDATE OR DELETE ON transcripts
     FOR EACH ROW EXECUTE FUNCTION transcripts_immutable();
+
+
+-- ===========================================================================
+-- Part 2: the Web App & Knowledge Graph (issue #13, PRD #12).
+--
+-- The first vertical — "Approve → Extract → See Claims" — needs the physical
+-- knowledge-graph schema (ADR-0008), a Postgres-backed job queue drained by the
+-- worker (ADR-0009), and the daily-Candidate admission lifecycle (ADR-0004,
+-- ADR-0007, ADR-0010). All added here, idempotently, to the one source-of-truth
+-- Postgres (ADR-0003); later slices fill out the personal layer and Impacts.
+-- ===========================================================================
+
+-- pgvector backs Concept-normalization and (later) semantic search over the
+-- extracted layer (ADR-0008). Idempotent; the container image ships the
+-- extension. Claims/Concepts/Protocols are embedded — never raw Transcripts.
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- A normalized, deduplicated hub node (CONTEXT.md "Concept"): a supplement, body
+-- system, mechanism, condition, or intervention that Claims and Protocols
+-- reference. Unlike Claims, Concepts MAY be merged/normalized — that is their
+-- purpose; normalization keys off the Concept's embedding (ADR-0008).
+CREATE TABLE IF NOT EXISTS concepts (
+    id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name       TEXT        NOT NULL,
+    kind       TEXT,                                       -- supplement | mechanism | …
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A Claim: a single falsifiable assertion drawn from a Source, the atomic unit
+-- of the Body of Knowledge (CONTEXT.md, ADR-0002). Provenance is a real FK to
+-- the video Source; the locator (seconds into the video) deep-links back to the
+-- exact moment (`watch?v=ID&t=NNNs`, ADR-0010). Sub-kinds are a `type` attribute,
+-- not separate tables (ADR-0002).
+CREATE TABLE IF NOT EXISTS claims (
+    id              BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    video_id        TEXT        NOT NULL REFERENCES videos (video_id),
+    text            TEXT        NOT NULL,
+    type            TEXT        NOT NULL DEFAULT 'finding'
+                                CHECK (type IN ('mechanism', 'principle', 'finding')),
+    locator_seconds INTEGER     NOT NULL CHECK (locator_seconds >= 0),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS claims_by_video ON claims (video_id);
+
+-- A Protocol: a parameterized recommendation with structure — action plus at
+-- least one of dose/timing/frequency/duration (CONTEXT.md, ADR-0010). Vague
+-- advice never reaches this table: the admit step demotes an unstructured
+-- "protocol" to a Claim. Like a Claim it is attributed to a Source and carries a
+-- locator. The structure CHECK enforces the contract at the database.
+CREATE TABLE IF NOT EXISTS protocols (
+    id              BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    video_id        TEXT        NOT NULL REFERENCES videos (video_id),
+    action          TEXT        NOT NULL,
+    dose            TEXT,
+    timing          TEXT,
+    frequency       TEXT,
+    duration        TEXT,
+    locator_seconds INTEGER     NOT NULL CHECK (locator_seconds >= 0),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (dose IS NOT NULL OR timing IS NOT NULL
+           OR frequency IS NOT NULL OR duration IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS protocols_by_video ON protocols (video_id);
+
+-- The one polymorphic edges table: every genuinely graph-shaped relationship —
+-- the many:many, computed, or traversable ones — lives here (ADR-0008).
+-- 1:many ownership (a Claim's Source) stays an FK column above, never an edge.
+-- The unique constraint makes edge-writes idempotent so re-extraction (ADR-0005)
+-- re-asserts without dup-checking; `kind` is CHECK-constrained, not an ENUM.
+CREATE TABLE IF NOT EXISTS edges (
+    id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    src_type   TEXT        NOT NULL,
+    src_id     BIGINT      NOT NULL,
+    dst_type   TEXT        NOT NULL,
+    dst_id     BIGINT      NOT NULL,
+    kind       TEXT        NOT NULL
+                           CHECK (kind IN ('references', 'supports', 'implements',
+                                           'serves', 'motivated_by')),
+    props      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (src_type, src_id, dst_type, dst_id, kind)
+);
+CREATE INDEX IF NOT EXISTS edges_by_src ON edges (src_type, src_id);
+CREATE INDEX IF NOT EXISTS edges_by_dst ON edges (dst_type, dst_id);
+
+-- Polymorphic src/dst can't be real FKs, so referential integrity is enforced by
+-- a fail-loud trigger (ADR-0008) — the same pattern transcript immutability uses.
+-- Each endpoint type maps to its node table; an endpoint pointing at a row that
+-- does not exist is rejected, so no dangling edges accumulate. Node types are
+-- extended here as the personal layer (decisions/goals/markers) lands.
+CREATE OR REPLACE FUNCTION edges_endpoint_exists(node_type TEXT, node_id BIGINT)
+RETURNS BOOLEAN AS $$
+DECLARE
+    found BOOLEAN;
+    tbl   TEXT;
+BEGIN
+    tbl := CASE node_type
+        WHEN 'claim'    THEN 'claims'
+        WHEN 'protocol' THEN 'protocols'
+        WHEN 'concept'  THEN 'concepts'
+        ELSE NULL
+    END;
+    IF tbl IS NULL THEN
+        RAISE EXCEPTION 'edges: unknown node type %', node_type;
+    END IF;
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE id = $1)', tbl)
+        INTO found USING node_id;
+    RETURN found;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION edges_integrity()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT edges_endpoint_exists(NEW.src_type, NEW.src_id) THEN
+        RAISE EXCEPTION 'edges: dangling src % %', NEW.src_type, NEW.src_id;
+    END IF;
+    IF NOT edges_endpoint_exists(NEW.dst_type, NEW.dst_id) THEN
+        RAISE EXCEPTION 'edges: dangling dst % %', NEW.dst_type, NEW.dst_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS edges_no_dangling ON edges;
+CREATE TRIGGER edges_no_dangling
+    BEFORE INSERT OR UPDATE ON edges
+    FOR EACH ROW EXECUTE FUNCTION edges_integrity();
+
+-- One append-only, model-stamped embeddings table over the extracted layer
+-- (ADR-0008): re-embedding against a better model is clean, in the spirit of the
+-- immutable Transcript (ADR-0001). HNSW + cosine for nearest-Concept lookup.
+CREATE TABLE IF NOT EXISTS embeddings (
+    id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    owner_type TEXT        NOT NULL,                       -- 'concept' | 'claim' | 'protocol'
+    owner_id   BIGINT      NOT NULL,
+    embedding  VECTOR(1536) NOT NULL,
+    model      TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS embeddings_hnsw
+    ON embeddings USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS embeddings_by_owner ON embeddings (owner_type, owner_id);
+
+-- The Postgres-backed job queue drained by the worker (ADR-0009): approval
+-- enqueues long work (extract → normalize → admit) and returns immediately, so a
+-- request never blocks. No Redis/Celery — "single Postgres" (ADR-0003) stays
+-- literally true. Drained with SELECT … FOR UPDATE SKIP LOCKED.
+CREATE TABLE IF NOT EXISTS jobs (
+    id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kind       TEXT        NOT NULL CHECK (kind IN ('admit')),
+    video_id   TEXT        NOT NULL REFERENCES videos (video_id),
+    state      TEXT        NOT NULL DEFAULT 'queued'
+                           CHECK (state IN ('queued', 'running', 'done', 'failed')),
+    attempts   INTEGER     NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS jobs_queued ON jobs (id) WHERE state = 'queued';
+
+-- The daily-Candidate admission lifecycle (CONTEXT.md "Candidate"; ADR-0004,
+-- ADR-0007, ADR-0010). A daily Candidate is a video already processed (transcript
+-- + summary) but not yet admitted to the Body of Knowledge. The owner's video-
+-- grain approval is the only human gate; extraction then auto-admits (ADR-0010):
+--
+--   candidate → approved → processing → admitted
+--                    └────────────────→ failed     (extraction error; retryable)
+--   candidate → rejected                            (owner declines)
+--
+-- The absence of a row means a plain, un-acted-on `candidate`; a row records
+-- where the owner's decision and the worker have taken it since.
+CREATE TABLE IF NOT EXISTS admissions (
+    video_id   TEXT        PRIMARY KEY REFERENCES videos (video_id),
+    state      TEXT        NOT NULL
+                           CHECK (state IN ('approved', 'processing',
+                                            'admitted', 'failed', 'rejected')),
+    error      TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

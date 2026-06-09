@@ -52,21 +52,41 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _webapp_link(base_url: str, video_id: str) -> str | None:
+    """Deep-link to a Candidate in the Web App review queue (ADR-0007).
+
+    Anchors the queue at the specific Candidate row; ``None`` when no Web App base
+    URL is configured, so the Digest degrades to source links alone.
+    """
+    if not base_url:
+        return None
+    return f"{base_url}/#candidate-{video_id}"
+
+
 def run_job(
     *,
     content_source: ContentSource,
     transcriber: Transcriber,
     summarizer: Summarizer,
-    digest_sender: DigestSender,
+    digest_sender: DigestSender | None,
     repo: Repository,
     model: str,
+    send_digest: bool = True,
+    webapp_base_url: str = "",
     now=_utcnow,
 ) -> RunResult:
     """Run the daily detection pipeline across every watched Creator.
 
     Detects each Creator's new uploads by diffing its RSS feed against the
-    already-processed set, processes only the new videos, and sends one Digest
-    bundling everything not yet emailed — or no Digest at all on an empty day.
+    already-processed set, processes only the new videos, and — unless
+    `send_digest` is off — sends one Digest bundling everything not yet emailed
+    (or no Digest at all on an empty day).
+
+    The Digest is only a notification (ADR-0007): with `send_digest` off the
+    pipeline still archives and summarizes, leaving the Summaries unsent so a
+    later run with email re-enabled picks them up; the system stays fully usable
+    with email switched off. When a `webapp_base_url` is given, each Digest item
+    deep-links into the Web App's review queue, where approval actually happens.
     """
     processed = repo.processed_video_ids()
     newly_processed: list[str] = []
@@ -102,11 +122,27 @@ def run_job(
             processed.add(video_id)
             newly_processed.append(video_id)
 
+    if not send_digest:
+        # Email is off (ADR-0007). Everything is archived and summarized; the
+        # Summaries stay unsent for a later run, and the system is fully usable
+        # through the Web App regardless.
+        return RunResult(
+            newly_processed=newly_processed, digest_sent=False, failures=failures
+        )
+
     # Bundle every summarized-but-unsent Summary — the run's new ones plus any
     # left unsent by an earlier failed send — into a single Digest.
     pending = repo.unsent_summaries()
     digest = Digest(
-        items=[DigestItem(title=s.title, url=s.url, summary=s.body) for s in pending]
+        items=[
+            DigestItem(
+                title=s.title,
+                url=s.url,
+                summary=s.body,
+                webapp_url=_webapp_link(webapp_base_url, s.video_id),
+            )
+            for s in pending
+        ]
     )
     if digest.is_empty:
         # Nothing new and nothing pending -> no Digest is sent (user story 19).

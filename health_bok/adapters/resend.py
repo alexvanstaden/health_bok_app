@@ -1,7 +1,9 @@
 """Resend adapter for the DigestSender port.
 
-Renders the Digest as a simple HTML email — one section per item, each linking
-to its source video — and sends it via Resend.
+Renders the Digest as a simple HTML email and sends it via Resend. The Digest is
+only a notification (ADR-0007): each item's primary call-to-action is a deep-link
+into the Web App, where the owner actually reviews and approves the Candidate; the
+source-video link is secondary. Nothing essential depends on this email.
 """
 
 from __future__ import annotations
@@ -37,15 +39,28 @@ class ResendDigestSender:
 
 
 def render_html(digest: Digest) -> str:
-    """Render the Digest to HTML. Each item links to its source video."""
+    """Render the Digest to HTML.
+
+    The Web App is the primary call-to-action per item (ADR-0007): "Review in the
+    Web App" deep-links into the review queue, where approval happens. The source
+    video stays available as a secondary link. When no Web App URL is configured
+    the item degrades gracefully to the source link alone.
+    """
     sections = []
     for item in digest.items:
         title = html.escape(item.title)
         url = html.escape(item.url, quote=True)
         body = html.escape(item.summary).replace("\n", "<br>")
+        cta = ""
+        if item.webapp_url:
+            review = html.escape(item.webapp_url, quote=True)
+            cta = f'<p><a href="{review}"><strong>Review in the Web App →</strong></a></p>\n'
         sections.append(
-            f'<h2><a href="{url}">{title}</a></h2>\n<p>{body}</p>'
+            f"<h2>{title}</h2>\n{cta}<p>{body}</p>\n"
+            f'<p><a href="{url}">Watch the source video</a></p>'
         )
     return (
-        "<h1>Today's new videos</h1>\n" + "\n<hr>\n".join(sections)
+        "<h1>New content to review</h1>\n"
+        "<p>Review and approve these in the Web App.</p>\n"
+        + "\n<hr>\n".join(sections)
     )

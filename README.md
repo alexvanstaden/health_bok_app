@@ -13,10 +13,12 @@ The system is built in two parts:
   detects new uploads, archives immutable Transcripts in Postgres, summarizes them, and
   emails a Digest. **This README documents Part 1: what it does and how to run it.**
 - **Part 2 — the Web App & knowledge graph** (PRD issue #12; ADRs 0007–0011) — *in
-  progress.* The self-hosted Web App is the primary interface: the owner approves
-  Candidates, extraction draws Claims and Protocols into the Body of Knowledge, records
-  the personal layer (Goals, Markers, Decisions), and queries it all in grounded, cited
-  natural language. Tracked in slices #13–18; not yet built.
+  progress; the first vertical is built.* The self-hosted Web App is the primary
+  interface: the owner approves Candidates, extraction draws Claims and Protocols into
+  the Body of Knowledge, records the personal layer (Goals, Markers, Decisions), and
+  queries it all in grounded, cited natural language. Tracked in slices #13–18 —
+  **slice 8 (issue #13), "Approve → Extract → See Claims", is now built** (see below);
+  the rest follow.
 
 ## Status
 
@@ -73,21 +75,42 @@ Knowledge (ADR-0004); listing is idempotent, so re-adding a Creator only tops up
 newly-published Candidates. Reviewing and approving Candidates — and the
 processing that approval triggers — is Part 2 (below).
 
-Candidate approval, extraction into the Body of Knowledge, the personal layer, and
-grounded natural-language query are **Part 2** — now specified in PRD issue #12 and ADRs
-0007–0011, and built in slices #13–18. All of it happens in the **Web App**, never in
-email; the Digest only links into it (ADR-0007).
+**Slice 8 — Approve → Extract → See Claims (issue #13).** The first Part-2 vertical, end
+to end through every new layer. The whole stack now runs under **docker-compose**
+(ADR-0009): Postgres, a Python **HTTP API** over the existing `health_bok` domain, the
+**Next.js Web App**, a background **worker**, and the daily pipeline as a scheduled
+container. The Web App loads over Tailscale with **no login** — the tailnet is the auth
+boundary. In it the owner sees each daily **Candidate** with its Summary and can:
+
+- **Approve** — enqueues a job in a Postgres-backed `jobs` table and returns immediately;
+  the worker drains it, walking the Candidate `approved → processing → admitted`.
+- The worker **extracts** Claims and Protocols precision-first (scope qualifiers
+  preserved; grounded-or-dropped with locator deep-links; Protocols only when structured —
+  action + dose/timing/frequency/duration, else the assertion stays a Claim), **normalizes
+  Concepts** (embed each mention → nearest-Concept match via pgvector → merge when close,
+  else mint a new Concept), and **auto-admits** — there is no second gate (ADR-0010).
+- **See Claims** — view a video's admitted Claims and Protocols, each with its Concepts
+  and a locator deep-link (`watch?v=ID&t=NNNs`) back to the moment it was asserted.
+- **Reject** a Candidate (removed from the queue, never admitted) or **Retry** one whose
+  extraction **failed** (the failure is visible and retryable).
+
+The daily **Digest** is demoted to a notification that deep-links into the Web App review
+queue; set `DIGEST_ENABLED=false` and the system stays fully usable with email off
+(ADR-0007). The personal layer (Goals, Markers, Decisions), graph browsing/editing, and
+grounded natural-language query are the remaining Part-2 slices (#14–18).
 
 ## Architecture
 
 A single self-hosted **Postgres** is the only source of truth (ADR-0003). The
 raw Transcript is the permanent record; the Summary is disposable and
-re-derivable (ADR-0001). No graph/entity extraction runs in Part 1 — the typed
-entity tables, polymorphic edges, and embeddings (ADR-0008) and the extraction
-that fills them (ADR-0010) are Part 2, layered onto this same Postgres.
+re-derivable (ADR-0001). Part 2 layers the knowledge graph onto this same
+Postgres (ADR-0008): typed entity tables (`claims`, `protocols`, `concepts`), one
+polymorphic `edges` table (integrity enforced by trigger, idempotent on a unique
+key), an append-only `embeddings` table (pgvector + HNSW), a `jobs` queue, and the
+daily-Candidate `admissions` lifecycle. Extraction fills them (ADR-0010).
 
-Four **ports** isolate every external boundary so the job can be tested with
-fakes while Postgres stays real:
+**Ports** isolate every external boundary so the job and worker can be tested with
+fakes while Postgres stays real. Part 1's four, plus Part 2's two:
 
 | Port            | Real adapter (`health_bok/adapters/`) | Service             |
 | --------------- | ------------------------------------- | ------------------- |
@@ -95,23 +118,34 @@ fakes while Postgres stays real:
 | `Transcriber`   | `whisper.py`                          | OpenAI Whisper — transcribes a caption-less video's audio (daily path only) |
 | `Summarizer`    | `claude.py` (single pass), wrapped by `summarizer.py` (map-reduce for long Transcripts) | Claude API          |
 | `DigestSender`  | `resend.py`                           | Resend              |
+| `Extractor`     | `extractor.py`                        | Claude API — Transcript → Claims + Protocols + Concept mentions (precision-first, ADR-0010) |
+| `Embedder`      | `embedder.py`                         | OpenAI `text-embedding-3-small` — 1536-d vectors for Concept normalization (ADR-0008) |
 
 ```
 health_bok/
 ├── config.py        env-var configuration (no secrets in code)
-├── models.py        domain types (CreatorIdentity, Transcript, Provenance, Summary, Digest)
-├── ports.py         the four port protocols
+├── models.py        domain types (Transcript, Provenance, Summary, Digest; Extraction/Claim/Protocol)
+├── ports.py         the six port protocols
 ├── db.py            Postgres connection + schema bootstrap
-├── schema.sql       creators / candidates / videos / transcripts / summaries / processing_state
-├── repository.py    persistence (creators, candidates, archive, summarize, mark processed/sent)
+├── schema.sql       Part 1 (creators/candidates/videos/transcripts/summaries/processing_state)
+│                    + Part 2 (concepts/claims/protocols/edges/embeddings/jobs/admissions)
+├── repository.py    persistence for both parts (one Repository over the one Postgres)
 ├── creators.py      Creator-management service (add / remove the watch list)
 ├── backfill.py      backfill Candidate population: list back-catalogue → metadata-only Candidates
 ├── summarizer.py    MapReduceSummarizer: chunk + reduce long Transcripts
-├── job.py           the orchestrator (run_job): RSS detect → spine → one Digest
-├── main.py          CLI: `run` (daily job) + `creators add|remove|list`
-└── adapters/        youtube · whisper · claude · resend
+├── job.py           the daily orchestrator (run_job): RSS detect → spine → one Digest
+├── review.py        owner-driven Candidate transitions: approve · reject · retry (Part 2)
+├── admit.py         extract → ground/structure → normalize Concepts → auto-admit (Part 2)
+├── concepts.py      ConceptNormalizer: embed → nearest via pgvector → merge/new (Part 2)
+├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle (Part 2)
+├── api.py           FastAPI HTTP API the Web App calls (Part 2)
+├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `creators …`
+└── adapters/        youtube · whisper · claude · resend · extractor · embedder
 
-deploy/              cron + systemd units that run the job daily (~6am)
+web/                 the Next.js Web App (review queue + claims view) — Part 2
+Dockerfile           Python image: API · worker · scheduled pipeline (one image, three commands)
+docker-compose.yml   db (pgvector) · api · worker · web · pipeline — the Part-2 stack
+deploy/              cron + systemd units (the Part-1 host-scheduling alternative)
 ```
 
 ## Setup
@@ -134,10 +168,15 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `SUMMARY_MAX_CHARS`        | Map-reduce above this Transcript length (default `48000`) |
 | `SUMMARY_CHUNK_CHARS`      | Section size when map-reducing (default `16000`)   |
 | `BACKFILL_CUTOFF_DAYS`     | Backfill window when a Creator is added (default `730`, ~2 years) |
-| `RESEND_API_KEY`           | Resend — the DigestSender                          |
-| `DIGEST_FROM`              | Verified Resend "from" address                      |
-| `DIGEST_RECIPIENT`         | Where the Digest is delivered                       |
-| `OPENAI_API_KEY`           | OpenAI Whisper — transcribes caption-less videos    |
+| `DIGEST_ENABLED`           | Send the Digest email at all (default `true`; `false` → no Resend secrets needed) |
+| `RESEND_API_KEY`           | Resend — the DigestSender (only when `DIGEST_ENABLED`) |
+| `DIGEST_FROM`              | Verified Resend "from" address (only when `DIGEST_ENABLED`) |
+| `DIGEST_RECIPIENT`         | Where the Digest is delivered (only when `DIGEST_ENABLED`) |
+| `OPENAI_API_KEY`           | OpenAI — Whisper transcription **and** Concept embeddings |
+| `EXTRACTION_MODEL`         | Claude model for extraction (Part 2; default `claude-sonnet-4-6`) |
+| `EMBEDDING_MODEL`          | Embedding model for Concept normalization (Part 2; default `text-embedding-3-small`) |
+| `CONCEPT_MERGE_DISTANCE`   | Cosine-distance merge threshold for Concepts (Part 2; default `0.15`) |
+| `WEBAPP_BASE_URL`          | Web App base URL for Digest deep-links (Part 2; optional) |
 
 ## Run the pipeline
 
@@ -164,6 +203,45 @@ no second email. A failed Digest send is retried on the next run without
 re-summarizing ("sent" is tracked separately from "processed"). One Creator's
 error (an unreachable feed, a missing transcript) is isolated and never aborts
 the rest of the run.
+
+## Run the Web App (Part 2)
+
+The whole Part-2 stack runs under docker-compose (ADR-0009): Postgres (pgvector),
+the HTTP API, the Next.js Web App, the worker, and the daily pipeline as a
+scheduled container.
+
+```bash
+cp .env.example .env        # fill in the secrets (or set DIGEST_ENABLED=false)
+docker compose up --build   # db + api + web + worker + pipeline
+```
+
+Then open the Web App at **http://localhost:3000** (in production, bind the
+published ports to your **Tailscale** address — the tailnet is the auth boundary,
+so there is no login screen). The flow:
+
+1. The home page is the **review queue**: each daily Candidate with its Summary.
+2. **Approve** a Candidate — the API enqueues a job and returns immediately; the
+   **worker** extracts Claims/Protocols, normalizes Concepts, and auto-admits,
+   and you watch the badge walk `approved → processing → admitted`.
+3. **View extracted claims** on a Candidate to see its admitted Claims and
+   Protocols, each with its Concepts and a locator deep-link into the video.
+4. **Reject** removes a Candidate from the queue; if extraction **failed**,
+   **Retry** re-runs it.
+
+The worker and pipeline read the same `.env`; the worker needs the LLM keys
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) to extract and embed. The HTTP API can
+also be run outside Docker for development:
+
+```bash
+pip install -e ".[web,dev]"
+uvicorn health_bok.api:app --reload      # the API
+health-bok worker                        # drain the admission queue
+```
+
+> **Dependency note:** the Web App pins `next@14.2.x` (latest patched). The
+> remaining `npm audit` advisories are Next.js DoS classes fixed only by a major
+> upgrade and a transitive PostCSS issue — none apply to a single-user app reached
+> only over Tailscale.
 
 ## Manage Creators
 
@@ -214,25 +292,35 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now health-bok.timer
 ```
 
-> Host cron/systemd is the supported path for the Part-1 build today. Part 2 moves the
-> stack into Docker containers and runs this pipeline as a **scheduled container** drained
-> by a Postgres-backed worker instead (ADR-0009) — no second datastore, same Postgres.
+> Host cron/systemd is the Part-1 standalone path. Under the Part-2 docker-compose
+> stack the pipeline instead runs as a **scheduled container** (it runs the job, then
+> sleeps a day) alongside the Postgres-backed **worker** (ADR-0009) — no second
+> datastore, same Postgres. Use whichever fits your deployment.
 
 ## Tests
 
-The primary tests drive the whole job end-to-end with the three ports faked and a
-**real ephemeral Postgres** (spun up via `testcontainers`), asserting on the
-persisted records and the captured Digest. `test_daily_job.py` covers detection
-across Creators, idempotent re-run, the empty day, per-Creator failure isolation,
-and the retriable failed send; `test_transcript_fallback.py` covers the
-captions-vs-Whisper decision (captions used when present, Whisper when absent,
-and the source recorded either way); `test_backfill.py` covers backfill Candidate
-population (metadata-only Candidates, the recency cutoff honored, idempotent
-re-runs, and that no transcription happens). They need Docker running.
-`test_map_reduce_summarizer.py` is a pure unit test of the chunk/reduce path
-(faked Summarizer, no Postgres) and needs no Docker.
+The primary tests drive the whole system end-to-end with the ports faked and a
+**real ephemeral Postgres + pgvector** (spun up via `testcontainers`), asserting on
+the persisted records and observable behaviour.
+
+Part 1: `test_daily_job.py` covers detection across Creators, idempotent re-run,
+the empty day, per-Creator failure isolation, and the retriable failed send;
+`test_transcript_fallback.py` covers the captions-vs-Whisper decision;
+`test_backfill.py` covers backfill Candidate population. `test_map_reduce_summarizer.py`
+is a pure unit test (no Postgres, no Docker).
+
+Part 2 (issue #13): `test_admission.py` drives Approve → Extract → See Claims —
+approval enqueues a job, the worker admits it, and Claims/Protocols/Concepts/edges
+land with provenance and locator deep-links (ungroundable assertions dropped,
+unstructured "protocols" demoted to Claims, scope qualifiers preserved), plus the
+failed-then-retry path. `test_concept_normalization.py` exercises merge-vs-new at
+the threshold with a `FakeEmbedder` over real pgvector; `test_edges.py` asserts the
+edges integrity trigger rejects dangling endpoints and the unique constraint dedupes
+re-asserts; `test_review.py` covers approve/reject queue effects; `test_email_demotion.py`
+covers the email off-switch and the Web App deep-link; `test_extractor_parsing.py`
+is a pure unit test of the extractor's JSON contract.
 
 ```bash
-source .venv/bin/activate
-pytest
+source .venv/bin/activate    # after: pip install -e ".[dev]"
+pytest                       # needs a running Docker daemon
 ```

@@ -1,15 +1,20 @@
 """Entrypoint: the `health-bok` command-line interface.
 
-Two responsibilities sit behind this CLI:
+Responsibilities behind this CLI (a Python CLI is an ops/admin convenience, not a
+product surface — the Web App is the product, ADR-0009):
 
   * ``health-bok run`` (the default) wires the real adapters to the orchestrator
     and runs the daily pipeline: for every watched Creator it detects new uploads
-    via RSS, summarizes them, and sends one Digest.
+    via RSS, summarizes them, and — unless email is off — sends one Digest that
+    deep-links into the Web App (ADR-0007).
+  * ``health-bok worker`` drains the Postgres-backed admission queue (ADR-0009):
+    extract → normalize Concepts → admit, walking each approved Candidate to
+    `admitted` (or `failed`, retryable). The docker `worker` service runs this.
   * ``health-bok creators add|remove|list`` maintains the watch list of
     Creators, resolving an @handle/URL to a stable channel_id once at add-time.
 
 Creator management needs only ``DATABASE_URL`` plus the YouTube adapter, so it
-never requires the Digest or Summarizer secrets to be set.
+never requires the Digest or LLM secrets to be set.
 """
 
 from __future__ import annotations
@@ -17,20 +22,28 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 
 from . import config, creators
 from .adapters.claude import ClaudeSummarizer
+from .adapters.embedder import OpenAIEmbedder
+from .adapters.extractor import ClaudeExtractor
 from .adapters.resend import ResendDigestSender
 from .adapters.whisper import WhisperTranscriber
 from .adapters.youtube import YouTubeContentSource
+from .concepts import ConceptNormalizer
 from .config import Config
 from .db import connect, init_schema
 from .job import run_job
 from .models import CreatorResolutionError
 from .repository import Repository
 from .summarizer import MapReduceSummarizer
+from .worker import drain
 
 logger = logging.getLogger("health_bok")
+
+# How long the worker waits before re-polling an empty admission queue.
+DEFAULT_WORKER_POLL_SECONDS = 5
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +59,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_p = sub.add_parser("run", help="Run the daily pipeline (the default).")
     run_p.set_defaults(handler=_cmd_run)
+
+    worker_p = sub.add_parser("worker", help="Drain the admission queue (Part 2).")
+    worker_p.add_argument(
+        "--once", action="store_true",
+        help="Drain the queue once and exit, instead of polling forever.",
+    )
+    worker_p.add_argument(
+        "--interval", type=int, default=DEFAULT_WORKER_POLL_SECONDS,
+        help="Seconds to wait before re-polling an empty queue (default 5).",
+    )
+    worker_p.set_defaults(handler=_cmd_worker)
 
     creators_p = sub.add_parser("creators", help="Manage the watched Creators.")
     creators_p.set_defaults(handler=lambda a: creators_p.error("a subcommand is required"))
@@ -71,6 +95,13 @@ def _cmd_run(_args: argparse.Namespace) -> int:
     try:
         init_schema(conn)
         repo = Repository(conn)
+        # Email is only a notification (ADR-0007): with it off, no Resend sender
+        # is built and the run still archives + summarizes everything.
+        digest_sender = (
+            ResendDigestSender(cfg.resend_api_key, cfg.digest_from, cfg.digest_recipient)
+            if cfg.digest_enabled
+            else None
+        )
         result = run_job(
             content_source=YouTubeContentSource(),
             transcriber=WhisperTranscriber(cfg.openai_api_key),
@@ -80,11 +111,11 @@ def _cmd_run(_args: argparse.Namespace) -> int:
                 max_chars=cfg.summary_max_chars,
                 chunk_chars=cfg.summary_chunk_chars,
             ),
-            digest_sender=ResendDigestSender(
-                cfg.resend_api_key, cfg.digest_from, cfg.digest_recipient
-            ),
+            digest_sender=digest_sender,
             repo=repo,
             model=cfg.claude_model,
+            send_digest=cfg.digest_enabled,
+            webapp_base_url=cfg.webapp_base_url,
         )
     finally:
         conn.close()
@@ -98,6 +129,38 @@ def _cmd_run(_args: argparse.Namespace) -> int:
     )
     for failure in result.failures:
         logger.warning("isolated failure: %s -> %s", failure.scope, failure.error)
+    return 0
+
+
+def _cmd_worker(args: argparse.Namespace) -> int:
+    """Drain the admission queue: extract → normalize → admit (ADR-0009, ADR-0010).
+
+    Builds the real Extractor (Claude) and Embedder (OpenAI) behind their ports
+    and runs the worker. Polls forever by default — the docker `worker` service —
+    or drains once with ``--once`` for an ops nudge. Needs the LLM and DB secrets
+    but never the Digest ones.
+    """
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        normalizer = ConceptNormalizer(
+            OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            repo,
+            model=config.embedding_model(),
+            merge_distance=config.concept_merge_distance(),
+        )
+        extractor = ClaudeExtractor(config.anthropic_api_key(), config.extraction_model())
+        logger.info("worker started (poll every %ss)", args.interval)
+        while True:
+            handled = drain(extractor=extractor, normalizer=normalizer, repo=repo)
+            if handled:
+                logger.info("worker drained %d job(s)", handled)
+            if args.once:
+                break
+            time.sleep(args.interval)
+    finally:
+        conn.close()
     return 0
 
 

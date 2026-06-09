@@ -28,6 +28,12 @@ DEFAULT_SUMMARY_CHUNK_CHARS = 16_000
 # flooded with a creator's ancient catalogue. Tunable via BACKFILL_CUTOFF_DAYS.
 DEFAULT_BACKFILL_CUTOFF_DAYS = 730
 
+# Part 2 (issue #13). Extraction defaults to the same Claude model as
+# summarization but is tunable separately (precision-first extraction may warrant
+# a stronger model than bulk summaries). Embedding model is pinned by ADR-0008.
+DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-6"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+
 
 class ConfigError(RuntimeError):
     """A required environment variable is missing."""
@@ -71,6 +77,74 @@ def database_url() -> str:
     return _require("DATABASE_URL")
 
 
+def _float(name: str, default: float) -> float:
+    """Read an optional positive-float knob, falling back to `default`."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(f"Environment variable {name!r} must be a number") from None
+    if value <= 0:
+        raise ConfigError(f"Environment variable {name!r} must be positive")
+    return value
+
+
+def _bool(name: str, default: bool) -> bool:
+    """Read an optional boolean knob ('1'/'true'/'yes' are true; blank → default)."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def anthropic_api_key() -> str:
+    """The Claude API key — needed by the worker for extraction (ADR-0010)."""
+    return _require("ANTHROPIC_API_KEY")
+
+
+def openai_api_key() -> str:
+    """The OpenAI API key — needed by the worker for embeddings (ADR-0008)."""
+    return _require("OPENAI_API_KEY")
+
+
+def extraction_model() -> str:
+    """The Claude model used for Claim/Protocol extraction (ADR-0010)."""
+    return os.environ.get("EXTRACTION_MODEL", DEFAULT_EXTRACTION_MODEL)
+
+
+def embedding_model() -> str:
+    """The embedding model used for Concept normalization (ADR-0008)."""
+    return os.environ.get("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+
+
+def concept_merge_distance() -> float:
+    """Cosine-distance threshold below which two mentions are the same Concept."""
+    from .concepts import DEFAULT_MERGE_DISTANCE
+
+    return _float("CONCEPT_MERGE_DISTANCE", DEFAULT_MERGE_DISTANCE)
+
+
+def webapp_base_url() -> str:
+    """Public base URL of the Web App, for Digest deep-links (ADR-0007).
+
+    Optional: when unset the Digest still lists items, just without the "review in
+    the Web App" deep-link. Trailing slash is trimmed so links compose cleanly.
+    """
+    return os.environ.get("WEBAPP_BASE_URL", "").rstrip("/")
+
+
+def digest_enabled() -> bool:
+    """Whether the daily Digest email is sent at all (ADR-0007).
+
+    Email is a notification, never essential — the system stays fully usable with
+    it off (set DIGEST_ENABLED=false), in which case the Resend secrets are not
+    required and no Digest is sent.
+    """
+    return _bool("DIGEST_ENABLED", True)
+
+
 def backfill_cutoff() -> timedelta:
     """The backfill recency window applied when a Creator is added (issue #7).
 
@@ -86,15 +160,27 @@ def backfill_cutoff() -> timedelta:
 
 @dataclass(frozen=True)
 class Config:
-    """Runtime configuration assembled from environment variables."""
+    """Runtime configuration assembled from environment variables.
+
+    Shared by the daily pipeline, the worker, and the API. The Resend fields are
+    only required when the Digest is enabled (ADR-0007): with email off the
+    pipeline runs without those secrets present.
+    """
 
     database_url: str
     anthropic_api_key: str
-    resend_api_key: str
     openai_api_key: str
     claude_model: str
     summary_max_chars: int
     summary_chunk_chars: int
+    # Part 2 (issue #13).
+    extraction_model: str
+    embedding_model: str
+    concept_merge_distance: float
+    webapp_base_url: str
+    digest_enabled: bool
+    # Resend — present only when the Digest is enabled.
+    resend_api_key: str
     digest_from: str
     digest_recipient: str
 
@@ -103,14 +189,15 @@ class Config:
         """Build configuration from the process environment.
 
         Raises ConfigError if any required secret or address is missing, so a
-        misconfigured deploy fails loudly at startup rather than mid-run.
+        misconfigured deploy fails loudly at startup rather than mid-run. The
+        Resend secrets are only required when DIGEST_ENABLED is on.
         """
+        enabled = digest_enabled()
         return cls(
             database_url=_require("DATABASE_URL"),
             anthropic_api_key=_require("ANTHROPIC_API_KEY"),
-            resend_api_key=_require("RESEND_API_KEY"),
             # Powers the Whisper transcription fallback for caption-less videos
-            # (PRD #1, user story 10).
+            # (PRD #1, user story 10) and Concept-embedding (ADR-0008).
             openai_api_key=_require("OPENAI_API_KEY"),
             claude_model=os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
             # The map-reduce threshold and chunk size (issue #6) are tunable but
@@ -121,6 +208,12 @@ class Config:
             summary_chunk_chars=_positive_int(
                 "SUMMARY_CHUNK_CHARS", DEFAULT_SUMMARY_CHUNK_CHARS
             ),
-            digest_from=_require("DIGEST_FROM"),
-            digest_recipient=_require("DIGEST_RECIPIENT"),
+            extraction_model=extraction_model(),
+            embedding_model=embedding_model(),
+            concept_merge_distance=concept_merge_distance(),
+            webapp_base_url=webapp_base_url(),
+            digest_enabled=enabled,
+            resend_api_key=_require("RESEND_API_KEY") if enabled else "",
+            digest_from=_require("DIGEST_FROM") if enabled else "",
+            digest_recipient=_require("DIGEST_RECIPIENT") if enabled else "",
         )
