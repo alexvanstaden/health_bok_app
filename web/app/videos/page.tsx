@@ -51,11 +51,12 @@ export default function LogsPage() {
           className="list-item"
         >
           <div className="row">
-            <strong>{v.creator}</strong>
+            <strong>{v.title}</strong>
             <span className={`badge ${v.bok_state}`}>{v.bok_state}</span>
             <span className="spacer" />
             <span className="muted">{formatDate(v.added_at)}</span>
           </div>
+          <div className="meta">{v.creator}</div>
           <div className="meta">{v.summary}</div>
         </a>
       ))}
