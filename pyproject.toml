@@ -12,7 +12,7 @@ dependencies = [
     "anthropic>=0.40",
     "openai>=1.50",
     "resend>=2.0",
-    "youtube-transcript-api>=0.6",
+    "youtube-transcript-api>=1.0,<2",  # 1.x changed the fetch API (see adapters/youtube.py)
     "yt-dlp>=2024.0",
 ]
 
