@@ -317,6 +317,42 @@ def reject_backfill(body: BulkReject) -> dict:
     return {"rejected": rejected}
 
 
+def _snippet(body: str, *, limit: int = 280) -> str:
+    """A brief description for the Logs list: the Summary's opening, trimmed at a
+    word boundary so a row stays glanceable (issue #33). The full Summary lives on
+    the video's own pages; here it is only a recognisable hint."""
+    text = " ".join(body.split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip() + "…"
+
+
+@app.get("/api/videos")
+def list_videos() -> dict:
+    """The Logs page: a read-only record of every processed video Source (issue #33).
+
+    Newest-added first, each with its Creator, the date it was added, a snippet of
+    its latest Summary, and a BoK-state badge (admitted / failed / pending). Backed
+    by one repository query; the page links each row to the video's Claims page. It
+    makes the existing dedup guard visible — the pipeline never reprocesses a video
+    here — but adds no behaviour and no actions (read-only).
+    """
+    with _repo() as repo:
+        videos = repo.list_processed_videos()
+    return {
+        "videos": [
+            {
+                "video_id": v.video_id,
+                "creator": v.creator_name,
+                "added_at": v.added_at.isoformat(),
+                "summary": _snippet(v.summary),
+                "bok_state": v.bok_state,
+            }
+            for v in videos
+        ]
+    }
+
+
 @app.get("/api/videos/{video_id}/claims")
 def video_claims(video_id: str) -> dict:
     """A video's admitted Claims and Protocols, each with a locator deep-link."""

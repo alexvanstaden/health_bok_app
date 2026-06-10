@@ -76,6 +76,25 @@ export function getVideoKnowledge(videoId: string): Promise<VideoKnowledge> {
   return json(`/api/videos/${videoId}/claims`);
 }
 
+// -- Logs: the record of every processed video Source (issue #33) -----------
+// A read-only list of every video the pipeline has processed into the Body of
+// Knowledge, newest-first. It makes the existing dedup guard (a video is never
+// reprocessed) visible; it has no actions. `bok_state` distinguishes what reached
+// the Body of Knowledge (admitted) from what was processed but never admitted
+// (failed / pending). Each row links to that video's existing Claims page.
+
+export type ProcessedVideo = {
+  video_id: string;
+  creator: string;
+  added_at: string;
+  summary: string;
+  bok_state: "admitted" | "failed" | "pending";
+};
+
+export function listVideos(): Promise<{ videos: ProcessedVideo[] }> {
+  return json("/api/videos");
+}
+
 // -- Creator management & backfill (issue #15) ------------------------------
 // Maintain the watch list and pull in a Creator's back-catalogue from the Web
 // App, so the owner never needs the CLI to feed the pipeline (ADR-0009). Adding

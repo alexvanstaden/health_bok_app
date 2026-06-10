@@ -30,8 +30,13 @@ def seed_processed_video(
     published_at: datetime = DEFAULT_PUBLISHED_AT,
     segments: list[TranscriptSegment] | None = None,
     summary: str = "A prose summary of the video.",
+    retrieved_at: datetime | None = None,
 ) -> None:
-    """Archive a Transcript + Summary for `video_id` and commit — a daily Candidate."""
+    """Archive a Transcript + Summary for `video_id` and commit — a daily Candidate.
+
+    `retrieved_at` (the "date added") defaults to now; pass an explicit value to
+    seed a deterministic newest-first ordering (the Logs page, issue #33).
+    """
     if segments is None:
         segments = [
             TranscriptSegment(text="Today we cover zone 2.", start=0.0, duration=3.0),
@@ -49,6 +54,6 @@ def seed_processed_video(
         source="captions",
     )
     now = datetime.now(timezone.utc)
-    repo.archive_transcript(fetched, retrieved_at=now)
+    repo.archive_transcript(fetched, retrieved_at=retrieved_at or now)
     repo.save_summary(video_id, summary, model="claude-sonnet-4-6", summarized_at=now)
     repo.commit()
