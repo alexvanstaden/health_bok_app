@@ -24,12 +24,12 @@ import logging
 import sys
 import time
 
-from . import config, creators
-from .adapters.claude import ClaudeSummarizer
+from . import config, creators, llm
 from .adapters.embedder import OpenAIEmbedder
-from .adapters.extractor import ClaudeExtractor
+from .adapters.extractor import ChatExtractor
 from .adapters.resend import ResendDigestSender
-from .adapters.stance import ClaudeStanceJudge
+from .adapters.stance import ChatStanceJudge
+from .adapters.summarize import ChatSummarizer
 from .adapters.whisper import WhisperTranscriber
 from .adapters.youtube import YouTubeContentSource
 from .concepts import ConceptNormalizer
@@ -107,14 +107,15 @@ def _cmd_run(_args: argparse.Namespace) -> int:
             content_source=YouTubeContentSource(),
             transcriber=WhisperTranscriber(cfg.openai_api_key),
             # Long Transcripts are map-reduced; short ones summarize in one pass.
+            # The summarizer runs on whichever provider LLM_PROVIDER selects.
             summarizer=MapReduceSummarizer(
-                ClaudeSummarizer(cfg.anthropic_api_key, cfg.claude_model),
+                ChatSummarizer(llm.chat_model(cfg.summary_model)),
                 max_chars=cfg.summary_max_chars,
                 chunk_chars=cfg.summary_chunk_chars,
             ),
             digest_sender=digest_sender,
             repo=repo,
-            model=cfg.claude_model,
+            model=cfg.summary_model,
             send_digest=cfg.digest_enabled,
             webapp_base_url=cfg.webapp_base_url,
         )
@@ -136,10 +137,10 @@ def _cmd_run(_args: argparse.Namespace) -> int:
 def _cmd_worker(args: argparse.Namespace) -> int:
     """Drain the admission queue: extract → normalize → admit (ADR-0009, ADR-0010).
 
-    Builds the real Extractor (Claude) and Embedder (OpenAI) behind their ports
-    and runs the worker. Polls forever by default — the docker `worker` service —
-    or drains once with ``--once`` for an ops nudge. Needs the LLM and DB secrets
-    but never the Digest ones.
+    Builds the real Extractor (on the configured LLM provider, ADR-0012) and
+    Embedder (OpenAI) behind their ports and runs the worker. Polls forever by
+    default — the docker `worker` service — or drains once with ``--once`` for an
+    ops nudge. Needs the LLM and DB secrets but never the Digest ones.
     """
     conn = connect(config.database_url())
     try:
@@ -151,11 +152,11 @@ def _cmd_worker(args: argparse.Namespace) -> int:
             model=config.embedding_model(),
             merge_distance=config.concept_merge_distance(),
         )
-        extractor = ClaudeExtractor(config.anthropic_api_key(), config.extraction_model())
+        extractor = ChatExtractor(llm.chat_model(config.extraction_model()))
         # After admission, the forward Impact pass judges the new Claims/Protocols
         # against the owner's anchors (issue #18) — failure-isolated, so a judge
         # hiccup never undoes an admission.
-        judge = ClaudeStanceJudge(config.anthropic_api_key(), config.stance_model())
+        judge = ChatStanceJudge(llm.chat_model(config.stance_model()))
         # A backfill Candidate has no archived Transcript, so the worker acquires
         # one transcribe-if-needed before extracting (issue #15): YouTube captions,
         # else Whisper (reusing the same OpenAI key the embedder needs).

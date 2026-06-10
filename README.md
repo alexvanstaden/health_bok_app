@@ -88,22 +88,30 @@ lifecycle.
 **Ports** isolate every external boundary, so the job and worker can be tested with fakes
 while Postgres stays real:
 
+The four LLM-backed ports (`Summarizer`, `Extractor`, `QueryAnswerer`, `StanceJudge`) don't
+talk to a provider directly — each builds its prompts and parses its output against one shared
+`ChatModel` seam, so the provider is swapped in a single factory (`llm.py`), not in four
+adapters. `LLM_PROVIDER` selects **OpenAI** (default — one fewer external provider, since
+OpenAI already does embeddings + Whisper) or **Anthropic** (ADR-0012).
+
 | Port            | Real adapter (`health_bok/adapters/`) | Service             |
 | --------------- | ------------------------------------- | ------------------- |
 | `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, lists the back-catalogue for backfill Candidates, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
 | `Transcriber`   | `whisper.py`                          | OpenAI Whisper — transcribes a caption-less video's audio (daily path only) |
-| `Summarizer`    | `claude.py` (single pass), wrapped by `summarizer.py` (map-reduce for long Transcripts) | Claude API          |
+| `ChatModel`     | `openai_chat.py` · `anthropic_chat.py` | The configured LLM provider — one system+user turn → text. The transport seam the four ports below share (ADR-0012) |
+| `Summarizer`    | `summarize.py` (single pass), wrapped by `summarizer.py` (map-reduce for long Transcripts) | via `ChatModel` |
 | `DigestSender`  | `resend.py`                           | Resend              |
-| `Extractor`     | `extractor.py`                        | Claude API — Transcript → Claims + Protocols + Concept mentions (precision-first) |
-| `Embedder`      | `embedder.py`                         | OpenAI `text-embedding-3-small` — 1536-d vectors for Concept normalization |
-| `QueryAnswerer` | `answerer.py`                         | Claude API — retrieved evidence → a grounded, cited answer or an abstention |
-| `StanceJudge`   | `stance.py`                           | Claude API — one knowledge↔anchor pair → a Stance for change detection |
+| `Extractor`     | `extractor.py`                        | via `ChatModel` — Transcript → Claims + Protocols + Concept mentions (precision-first) |
+| `Embedder`      | `embedder.py`                         | OpenAI `text-embedding-3-small` — 1536-d vectors for Concept normalization (always OpenAI) |
+| `QueryAnswerer` | `answerer.py`                         | via `ChatModel` — retrieved evidence → a grounded, cited answer or an abstention |
+| `StanceJudge`   | `stance.py`                           | via `ChatModel` — one knowledge↔anchor pair → a Stance for change detection |
 
 ```
 health_bok/
 ├── config.py        env-var configuration (no secrets in code)
 ├── models.py        domain types (Transcript, Provenance, Summary, Digest; Extraction/Claim/Protocol; query + Impact port types)
-├── ports.py         the eight port protocols
+├── ports.py         the nine port protocols (incl. the provider-neutral ChatModel)
+├── llm.py           ChatModel factory: picks the provider from LLM_PROVIDER
 ├── db.py            Postgres connection + schema bootstrap
 ├── schema.sql       creators/candidates/videos/transcripts/summaries/processing_state
 │                    + concepts/claims/protocols/edges/embeddings/jobs/admissions/goals/markers/decisions/impacts
@@ -122,7 +130,7 @@ health_bok/
 ├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle + forward Impact pass
 ├── api.py           FastAPI HTTP API the Web App calls: review · BoK · personal · query · Impacts
 ├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `creators …`
-└── adapters/        youtube · whisper · claude · resend · extractor · embedder · answerer · stance
+└── adapters/        youtube · whisper · resend · embedder · openai_chat · anthropic_chat · summarize · extractor · answerer · stance
 
 web/                 the Next.js Web App — review queue, BoK browser, personal layer, Ask, Impacts
 Dockerfile           Python image: API · worker · scheduled pipeline (one image, three commands)
@@ -145,8 +153,10 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | Variable                   | Purpose                                            |
 | -------------------------- | -------------------------------------------------- |
 | `DATABASE_URL`             | Postgres connection (the single source of truth)   |
-| `ANTHROPIC_API_KEY`        | Claude — the Summarizer                            |
-| `CLAUDE_MODEL`             | Summarization model (default `claude-sonnet-4-6`)  |
+| `LLM_PROVIDER`             | Provider for the four chat tasks: `openai` (default) or `anthropic` (ADR-0012) |
+| `OPENAI_API_KEY`           | OpenAI — Whisper, Concept embeddings, **and** the chat tasks (when provider is `openai`) |
+| `ANTHROPIC_API_KEY`        | Claude — required **only** when `LLM_PROVIDER=anthropic` |
+| `SUMMARY_MODEL`            | Summarization model (default: provider's default chat model; OpenAI → `gpt-4.1`) |
 | `SUMMARY_MAX_CHARS`        | Map-reduce above this Transcript length (default `48000`) |
 | `SUMMARY_CHUNK_CHARS`      | Section size when map-reducing (default `16000`)   |
 | `BACKFILL_CUTOFF_DAYS`     | Backfill window when a Creator is added (default `730`, ~2 years) |
@@ -154,14 +164,13 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `RESEND_API_KEY`           | Resend — the DigestSender (only when `DIGEST_ENABLED`) |
 | `DIGEST_FROM`              | Verified Resend "from" address (only when `DIGEST_ENABLED`) |
 | `DIGEST_RECIPIENT`         | Where the Digest is delivered (only when `DIGEST_ENABLED`) |
-| `OPENAI_API_KEY`           | OpenAI — Whisper transcription **and** Concept embeddings |
-| `EXTRACTION_MODEL`         | Claude model for extraction (default `claude-sonnet-4-6`) |
-| `EMBEDDING_MODEL`          | Embedding model for Concept normalization (default `text-embedding-3-small`) |
+| `EXTRACTION_MODEL`         | Model for extraction (default: provider's default chat model) |
+| `EMBEDDING_MODEL`          | Embedding model for Concept normalization (default `text-embedding-3-small`; always OpenAI) |
 | `CONCEPT_MERGE_DISTANCE`   | Cosine-distance merge threshold for Concepts (default `0.15`) |
 | `WEBAPP_BASE_URL`          | Web App base URL for Digest deep-links (optional)  |
-| `QUERY_MODEL`              | Claude model for grounded-query synthesis (default `claude-sonnet-4-6`) |
+| `QUERY_MODEL`              | Model for grounded-query synthesis (default: provider's default chat model) |
 | `QUERY_MAX_DISTANCE`       | Cosine-distance abstention cutoff for query retrieval (default `0.6`) |
-| `STANCE_MODEL`             | Claude model for the Impact StanceJudge (default `claude-sonnet-4-6`) |
+| `STANCE_MODEL`             | Model for the Impact StanceJudge (default: provider's default chat model) |
 | `IMPACT_CANDIDATE_LIMIT`   | Per-category cap on candidates a detection pass judges (default `25`) |
 
 ## Run the pipeline
@@ -192,9 +201,9 @@ screen. From the top nav you can work the review queue, manage Creators and back
 and edit the Body of Knowledge, record the personal layer, **Ask** grounded questions, and
 triage the **Impacts** inbox (see [What it does](#what-it-does)).
 
-The worker and pipeline read the same `.env`; the worker needs the LLM keys
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) to extract and embed. The HTTP API can also be run
-outside Docker for development:
+The worker and pipeline read the same `.env`; the worker needs `OPENAI_API_KEY` (the default
+provider, plus embeddings) to extract and embed — or `ANTHROPIC_API_KEY` instead if
+`LLM_PROVIDER=anthropic`. The HTTP API can also be run outside Docker for development:
 
 ```bash
 pip install -e ".[web,dev]"

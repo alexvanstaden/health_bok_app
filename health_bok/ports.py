@@ -106,6 +106,22 @@ class Transcriber(Protocol):
 
 
 @runtime_checkable
+class ChatModel(Protocol):
+    """One provider-neutral LLM turn: a system + user prompt in, text out (ADR-0012).
+
+    The shared transport seam behind every Claude/GPT-backed adapter — the
+    Summarizer, Extractor, QueryAnswerer, and StanceJudge. Each of those owns its
+    prompts and its parsing; only this call differs between providers, so swapping
+    OpenAI for Anthropic (or a fake in tests) is one factory away (`health_bok.llm`)
+    and never touches the four feature adapters.
+    """
+
+    def complete(self, *, system: str, user: str, max_tokens: int) -> str:
+        """Return the model's text reply to `system` + `user`."""
+        ...
+
+
+@runtime_checkable
 class Summarizer(Protocol):
     """Turns a Transcript into a prose Summary (CONTEXT.md)."""
 
