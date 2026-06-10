@@ -144,6 +144,22 @@ class CandidateMetadata:
         return thumbnail_url(self.video_id)
 
 
+@dataclass(frozen=True)
+class CandidateDetails:
+    """The description + accurate publish date lazily fetched for a Candidate (issue #31).
+
+    The cheap single-pass backfill listing (user story 29) lists a back-catalogue
+    without per-video descriptions and with only a best-effort publish date — when a
+    flat entry carries neither a timestamp nor an upload_date, the date falls back to
+    "now". This is what *one* per-video extraction recovers on demand: the real
+    description and the accurate publish date, fetched only when the owner asks and
+    then persisted onto the Candidate so the queue shows them in place (AC 31).
+    """
+
+    description: str
+    published_at: datetime
+
+
 def locator_url(video_url: str, locator_seconds: int) -> str:
     """A deep-link back to the exact moment a Claim/Protocol was asserted.
 

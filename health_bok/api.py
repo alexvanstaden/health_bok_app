@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import config, creators, curation, impacts, personal, query, review
+from . import backfill, config, creators, curation, impacts, personal, query, review
 from .adapters.answerer import ClaudeQueryAnswerer
 from .adapters.embedder import OpenAIEmbedder
 from .adapters.stance import ClaudeStanceJudge
@@ -265,27 +265,48 @@ def trigger_backfill(channel_id: str) -> dict:
     return {"channel_id": channel_id, "stored": stored, "count": len(stored)}
 
 
-@app.get("/api/backfill")
-def list_backfill() -> dict:
-    """The backfill review queue: metadata-only Candidates awaiting a decision."""
-    with _repo() as repo:
-        candidates = repo.list_backfill_candidates()
+def _backfill_payload(c) -> dict:
+    """One backfill Candidate as the Web App's JSON — shared by the queue and the
+    lazy detail fetch so both return the identical shape (issue #31)."""
     return {
-        "candidates": [
-            {
-                "video_id": c.video_id,
-                "title": c.title,
-                "description": c.description,
-                "url": c.url,
-                "thumbnail_url": c.thumbnail_url,
-                "published_at": c.published_at.isoformat(),
-                "channel_id": c.channel_id,
-                "channel_name": c.channel_name,
-                "state": c.state,
-            }
-            for c in candidates
-        ]
+        "video_id": c.video_id,
+        "title": c.title,
+        "description": c.description,
+        "url": c.url,
+        "thumbnail_url": c.thumbnail_url,
+        "published_at": c.published_at.isoformat(),
+        "channel_id": c.channel_id,
+        "channel_name": c.channel_name,
+        "state": c.state,
     }
+
+
+@app.get("/api/backfill")
+def list_backfill(order: str = "newest") -> dict:
+    """The backfill review queue: metadata-only Candidates awaiting a decision.
+
+    `order` sorts by publish date — `newest` (default) or `oldest` (issue #31).
+    """
+    with _repo() as repo:
+        candidates = repo.list_backfill_candidates(newest_first=order != "oldest")
+    return {"candidates": [_backfill_payload(c) for c in candidates]}
+
+
+@app.post("/api/backfill/{video_id}/fetch-details")
+def fetch_backfill_details(video_id: str) -> dict:
+    """Lazily fetch one Candidate's real description + accurate publish date (issue #31).
+
+    Performs a single per-video YouTube extraction, persists both fields on the
+    Candidate, and returns the updated Candidate so the queue shows them in place.
+    Idempotent — safe to re-run. 404 if the video_id names no backfill Candidate.
+    """
+    with _repo() as repo:
+        candidate = backfill.fetch_candidate_details(
+            video_id, content_source=YouTubeContentSource(), repo=repo
+        )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    return _backfill_payload(candidate)
 
 
 @app.post("/api/backfill/reject")

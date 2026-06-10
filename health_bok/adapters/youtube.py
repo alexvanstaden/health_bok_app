@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 from ..models import (
+    CandidateDetails,
     CandidateMetadata,
     CreatorIdentity,
     CreatorResolutionError,
@@ -119,6 +120,20 @@ class YouTubeContentSource:
             )
         return candidates
 
+    def fetch_candidate_details(self, video_id: str) -> CandidateDetails:
+        # Lazy per-video detail fetch (issue #31): one full extraction — *not*
+        # extract_flat — so the real description and accurate publish date the cheap
+        # listing omitted are recovered. Run only when the owner asks on a single
+        # Candidate, so the expensive per-video call stays out of the backfill listing
+        # (user story 29). Still metadata only: no captions, no audio, no Whisper.
+        from yt_dlp import YoutubeDL
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        opts = {"quiet": True, "skip_download": True, "no_warnings": True}
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        return _candidate_details(info)
+
     def fetch_transcript(self, video_id: str) -> FetchedTranscript | None:
         # Captions are checked first: a caption-less video returns None without
         # the (wasted) metadata fetch, and the caller falls back to Whisper.
@@ -219,6 +234,20 @@ def _parse_upload_date(upload_date: str | None) -> datetime:
     if not upload_date:
         return datetime.now(timezone.utc)
     return datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+
+
+def _candidate_details(info: dict) -> CandidateDetails:
+    """Build a Candidate's fetched details from a full per-video extraction (issue #31).
+
+    A full (non-flat) extraction carries the per-video `description` and a `timestamp`
+    /`upload_date`, so the publish date is the accurate one — unlike the flat listing's
+    best-effort fallback. The same `_entry_published_at` precedence is reused, so a
+    video that genuinely exposes no date still degrades to now rather than raising.
+    """
+    return CandidateDetails(
+        description=info.get("description") or "",
+        published_at=_entry_published_at(info),
+    )
 
 
 def _entry_published_at(entry: dict) -> datetime:
