@@ -53,8 +53,6 @@ h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
 .badge.approved, .badge.processing { color: var(--amber); border-color: var(--amber); }
 .badge.admitted { color: var(--green); border-color: var(--green); }
 .badge.failed { color: var(--red); border-color: var(--red); }
-/* Logs BoK-state (issue #33): processed but not yet in the Body of Knowledge. */
-.badge.pending { color: var(--amber); border-color: var(--amber); }
 
 /* Impact stances (issue #18): reinforces is reassuring, contradicts alarming,
    refines a nuance, opportunity an opening. */
