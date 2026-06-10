@@ -85,6 +85,7 @@ export function getVideoKnowledge(videoId: string): Promise<VideoKnowledge> {
 
 export type ProcessedVideo = {
   video_id: string;
+  title: string;
   creator: string;
   added_at: string;
   summary: string;

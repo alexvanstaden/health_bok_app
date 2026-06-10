@@ -343,6 +343,7 @@ def list_videos() -> dict:
         "videos": [
             {
                 "video_id": v.video_id,
+                "title": v.title,
                 "creator": v.creator_name,
                 "added_at": v.added_at.isoformat(),
                 "summary": _snippet(v.summary),

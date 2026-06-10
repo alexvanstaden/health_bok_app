@@ -72,8 +72,8 @@ boundary. In it you:
   actioning records the Decision you revise or create in response. A resolved Impact never
   re-nags.
 - **See the Logs.** A read-only record of every video Source the pipeline has processed,
-  newest-first — each with its Creator, the date it was added, a snippet of its latest
-  Summary, and a **BoK-state** badge (*admitted · failed · pending*) distinguishing what
+  newest-first — each with its title, its Creator, the date it was added, a snippet of its
+  latest Summary, and a **BoK-state** badge (*admitted · failed · pending*) distinguishing what
   reached the Body of Knowledge from what was processed but never admitted. It makes the
   pipeline's dedup guard visible — a video is never reprocessed twice — and links each row
   through to that video's Claims. It has no actions.

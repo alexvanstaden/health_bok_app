@@ -35,6 +35,7 @@ def test_processed_videos_listed_newest_added_first_with_bok_state(conn):
         video_id="vid_admitted",
         channel_id="UC_lab",
         channel_name="Longevity Lab",
+        title="Zone 2 Cardio Explained",
         summary="Zone 2 training raises mitochondrial density.",
         retrieved_at=_at(1),
     )
@@ -73,7 +74,8 @@ def test_processed_videos_listed_newest_added_first_with_bok_state(conn):
     assert by_id["vid_failed"].bok_state == "failed"
     assert by_id["vid_pending"].bok_state == "pending"
 
-    # Each row carries the Creator name, the date added, and its latest Summary.
+    # Each row carries the title, Creator name, the date added, and latest Summary.
+    assert by_id["vid_admitted"].title == "Zone 2 Cardio Explained"
     assert by_id["vid_admitted"].creator_name == "Longevity Lab"
     assert by_id["vid_admitted"].added_at == _at(1)
     assert "mitochondrial density" in by_id["vid_admitted"].summary

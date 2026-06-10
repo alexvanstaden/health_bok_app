@@ -78,6 +78,7 @@ class ProcessedVideo:
     """
 
     video_id: str
+    title: str
     creator_name: str
     added_at: datetime
     summary: str
@@ -1022,7 +1023,7 @@ class Repository:
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT v.video_id, cr.name, v.retrieved_at, s.body, "
+                "SELECT v.video_id, v.title, cr.name, v.retrieved_at, s.body, "
                 "       CASE a.state "
                 "         WHEN 'admitted' THEN 'admitted' "
                 "         WHEN 'failed' THEN 'failed' "
@@ -1041,10 +1042,11 @@ class Repository:
             return [
                 ProcessedVideo(
                     video_id=r[0],
-                    creator_name=r[1],
-                    added_at=r[2],
-                    summary=r[3],
-                    bok_state=r[4],
+                    title=r[1],
+                    creator_name=r[2],
+                    added_at=r[3],
+                    summary=r[4],
+                    bok_state=r[5],
                 )
                 for r in cur.fetchall()
             ]
