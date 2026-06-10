@@ -1,0 +1,115 @@
+"""The Logs page's read model: every processed video Source, newest-first (issue #33).
+
+The Logs page is a read-only record of what the pipeline has processed into the
+Body of Knowledge. Its whole behaviour lives in one repository query — videos ⋈
+creators ⋈ latest Summary ⋈ admission state — which the `GET /api/videos` endpoint
+serialises verbatim (the thin-serialisation pattern the API uses throughout, and
+which the test suite deliberately does not import — see `health_bok/api.py`). So
+these drive the query directly against a real Postgres: ordering, the BoK-state
+badge derived from the admission lifecycle, and that a processed-but-never-admitted
+video still appears.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from health_bok.repository import Repository
+from tests.seed import seed_processed_video
+
+
+def _at(day: int) -> datetime:
+    return datetime(2026, 3, day, 12, 0, tzinfo=timezone.utc)
+
+
+def test_empty_system_returns_no_rows(conn):
+    assert Repository(conn).list_processed_videos() == []
+
+
+def test_processed_videos_listed_newest_added_first_with_bok_state(conn):
+    repo = Repository(conn)
+
+    # An admitted video: it reached the Body of Knowledge.
+    seed_processed_video(
+        repo,
+        video_id="vid_admitted",
+        channel_id="UC_lab",
+        channel_name="Longevity Lab",
+        summary="Zone 2 training raises mitochondrial density.",
+        retrieved_at=_at(1),
+    )
+    repo.set_admission("vid_admitted", "admitted")
+    repo.commit()
+
+    # A failed video: processed, approved, but extraction errored — still a record.
+    seed_processed_video(
+        repo,
+        video_id="vid_failed",
+        channel_id="UC_sleep",
+        channel_name="Sleep Science",
+        summary="Magnesium glycinate before bed.",
+        retrieved_at=_at(2),
+    )
+    repo.set_admission("vid_failed", "failed", error="extractor blew up")
+    repo.commit()
+
+    # A pending video: processed but never acted on (no admission row).
+    seed_processed_video(
+        repo,
+        video_id="vid_pending",
+        channel_id="UC_heart",
+        channel_name="Heart Health",
+        summary="apoB is the better lipid target.",
+        retrieved_at=_at(3),
+    )
+
+    videos = repo.list_processed_videos()
+
+    # Newest-added first (by retrieved_at).
+    assert [v.video_id for v in videos] == ["vid_pending", "vid_failed", "vid_admitted"]
+
+    by_id = {v.video_id: v for v in videos}
+    assert by_id["vid_admitted"].bok_state == "admitted"
+    assert by_id["vid_failed"].bok_state == "failed"
+    assert by_id["vid_pending"].bok_state == "pending"
+
+    # Each row carries the Creator name, the date added, and its latest Summary.
+    assert by_id["vid_admitted"].creator_name == "Longevity Lab"
+    assert by_id["vid_admitted"].added_at == _at(1)
+    assert "mitochondrial density" in by_id["vid_admitted"].summary
+
+
+def test_in_flight_and_rejected_videos_read_as_pending(conn):
+    repo = Repository(conn)
+    for vid, state in [
+        ("vid_approved", "approved"),
+        ("vid_processing", "processing"),
+        ("vid_rejected", "rejected"),
+    ]:
+        seed_processed_video(repo, video_id=vid, retrieved_at=_at(1))
+        repo.set_admission(vid, state)
+        repo.commit()
+
+    states = {v.video_id: v.bok_state for v in repo.list_processed_videos()}
+    assert states == {
+        "vid_approved": "pending",
+        "vid_processing": "pending",
+        "vid_rejected": "pending",
+    }
+
+
+def test_latest_summary_wins(conn):
+    repo = Repository(conn)
+    seed_processed_video(
+        repo, video_id="vid_resummarized", summary="The first, older summary."
+    )
+    repo.save_summary(
+        "vid_resummarized",
+        "The newer, better summary.",
+        model="claude-opus-4-8",
+        summarized_at=datetime.now(timezone.utc),
+    )
+    repo.commit()
+
+    [video] = repo.list_processed_videos()
+    assert video.summary == "The newer, better summary."

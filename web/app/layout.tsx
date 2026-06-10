@@ -27,6 +27,7 @@ export default function RootLayout({
           <a href="/goals">Goals</a>
           <a href="/markers">Markers</a>
           <a href="/decisions">Decisions</a>
+          <a href="/videos">Logs</a>
         </nav>
         <main>{children}</main>
       </body>

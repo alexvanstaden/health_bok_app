@@ -64,6 +64,27 @@ class DailyCandidate:
 
 
 @dataclass(frozen=True)
+class ProcessedVideo:
+    """A processed video Source for the Logs page (issue #33).
+
+    A read-only record row: a video the pipeline has fully processed (Transcript +
+    Summary) — the existing "processed" definition (`processing_state.summarized_at`
+    set, the same set `processed_video_ids` dedups on). `bok_state` distinguishes
+    what actually reached the Body of Knowledge from what was processed but never
+    admitted: `admitted` (in the Body of Knowledge), `failed` (extraction errored),
+    or `pending` (everything still in flight or never approved). The Logs page is
+    labelled "Logs" by the owner's explicit choice — a known divergence from the
+    CONTEXT.md "Source" glossary.
+    """
+
+    video_id: str
+    creator_name: str
+    added_at: datetime
+    summary: str
+    bok_state: str  # 'admitted' | 'failed' | 'pending'
+
+
+@dataclass(frozen=True)
 class QueuedJob:
     """A claimed unit of background work drained by the worker (ADR-0009)."""
 
@@ -982,6 +1003,48 @@ class Repository:
                     state=r[3],
                     published_at=r[4],
                     summary=r[5],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def list_processed_videos(self) -> list[ProcessedVideo]:
+        """Every fully-processed video Source, newest-added first (issue #33).
+
+        Backs the read-only Logs page: a record of what the pipeline has processed
+        into the Body of Knowledge. "Processed" is the existing definition — a video
+        with `summarized_at` stamped, the same set `processed_video_ids` dedups on —
+        so a video that was processed but never admitted (e.g. extraction failed)
+        still appears, distinguished by `bok_state`. One query: videos ⋈ creators ⋈
+        latest Summary ⋈ admission state. Ordered by `retrieved_at` (when the system
+        pulled it in — the "date added") so the newest record is first. `bok_state`
+        collapses the admission lifecycle to the three states the page shows:
+        `admitted`, `failed`, or `pending` (no row, or still in flight / declined).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT v.video_id, cr.name, v.retrieved_at, s.body, "
+                "       CASE a.state "
+                "         WHEN 'admitted' THEN 'admitted' "
+                "         WHEN 'failed' THEN 'failed' "
+                "         ELSE 'pending' END AS bok_state "
+                "FROM processing_state ps "
+                "JOIN videos v ON v.video_id = ps.video_id "
+                "JOIN creators cr ON cr.id = v.creator_id "
+                "JOIN LATERAL ("
+                "  SELECT body FROM summaries s WHERE s.video_id = v.video_id "
+                "  ORDER BY s.created_at DESC, s.id DESC LIMIT 1"
+                ") s ON TRUE "
+                "LEFT JOIN admissions a ON a.video_id = v.video_id "
+                "WHERE ps.summarized_at IS NOT NULL "
+                "ORDER BY v.retrieved_at DESC, v.video_id"
+            )
+            return [
+                ProcessedVideo(
+                    video_id=r[0],
+                    creator_name=r[1],
+                    added_at=r[2],
+                    summary=r[3],
+                    bok_state=r[4],
                 )
                 for r in cur.fetchall()
             ]

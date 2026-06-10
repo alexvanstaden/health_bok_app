@@ -71,6 +71,12 @@ boundary. In it you:
   by stance and anchor; review, dismiss (or bulk-dismiss a burst), or **action** one —
   actioning records the Decision you revise or create in response. A resolved Impact never
   re-nags.
+- **See the Logs.** A read-only record of every video Source the pipeline has processed,
+  newest-first — each with its Creator, the date it was added, a snippet of its latest
+  Summary, and a **BoK-state** badge (*admitted · failed · pending*) distinguishing what
+  reached the Body of Knowledge from what was processed but never admitted. It makes the
+  pipeline's dedup guard visible — a video is never reprocessed twice — and links each row
+  through to that video's Claims. It has no actions.
 
 The Digest is just a notification that deep-links into the Web App's review queue; set
 `DIGEST_ENABLED=false` and the system stays fully usable with email off.
@@ -124,7 +130,7 @@ health_bok/
 ├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `creators …`
 └── adapters/        youtube · whisper · claude · resend · extractor · embedder · answerer · stance
 
-web/                 the Next.js Web App — review queue, BoK browser, personal layer, Ask, Impacts
+web/                 the Next.js Web App — review queue, BoK browser, personal layer, Ask, Impacts, Logs
 Dockerfile           Python image: API · worker · scheduled pipeline (one image, three commands)
 docker-compose.yml   db (pgvector) · api · worker · web · pipeline
 deploy/              cron + systemd units (the host-scheduling alternative to the scheduled container)
@@ -189,8 +195,9 @@ docker compose up --build   # db + api + web + worker + pipeline
 Then open the Web App at **http://localhost:3000**. In production, bind the published ports
 to your **Tailscale** address — the tailnet is the auth boundary, so there is no login
 screen. From the top nav you can work the review queue, manage Creators and backfill, browse
-and edit the Body of Knowledge, record the personal layer, **Ask** grounded questions, and
-triage the **Impacts** inbox (see [What it does](#what-it-does)).
+and edit the Body of Knowledge, record the personal layer, **Ask** grounded questions, triage
+the **Impacts** inbox, and review the **Logs** of every processed video (see
+[What it does](#what-it-does)).
 
 The worker and pipeline read the same `.env`; the worker needs the LLM keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) to extract and embed. The HTTP API can also be run
