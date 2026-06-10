@@ -329,13 +329,13 @@ def _snippet(body: str, *, limit: int = 280) -> str:
 
 @app.get("/api/videos")
 def list_videos() -> dict:
-    """The Logs page: a read-only record of every processed video Source (issue #33).
+    """The Logs page: a read-only record of admitted/failed video Sources (issue #33).
 
-    Newest-added first, each with its Creator, the date it was added, a snippet of
-    its latest Summary, and a BoK-state badge (admitted / failed / pending). Backed
-    by one repository query; the page links each row to the video's Claims page. It
-    makes the existing dedup guard visible — the pipeline never reprocesses a video
-    here — but adds no behaviour and no actions (read-only).
+    Newest-added first, each with its title, Creator, the date it was added, a
+    snippet of its latest Summary, and a BoK-state badge (admitted / failed). Only
+    videos that reached a terminal admission are listed — ones still in flight or
+    never approved are hidden. Backed by one repository query; the page links each
+    row to the video's Claims page. Read-only: no actions.
     """
     with _repo() as repo:
         videos = repo.list_processed_videos()

@@ -71,12 +71,12 @@ boundary. In it you:
   by stance and anchor; review, dismiss (or bulk-dismiss a burst), or **action** one —
   actioning records the Decision you revise or create in response. A resolved Impact never
   re-nags.
-- **See the Logs.** A read-only record of every video Source the pipeline has processed,
-  newest-first — each with its title, its Creator, the date it was added, a snippet of its
-  latest Summary, and a **BoK-state** badge (*admitted · failed · pending*) distinguishing what
-  reached the Body of Knowledge from what was processed but never admitted. It makes the
-  pipeline's dedup guard visible — a video is never reprocessed twice — and links each row
-  through to that video's Claims. It has no actions.
+- **See the Logs.** A read-only record of every video Source that reached a terminal
+  admission, newest-first — each with its title, its Creator, the date it was added, a snippet
+  of its latest Summary, and a **BoK-state** badge (*admitted · failed*) distinguishing what
+  reached the Body of Knowledge from what failed extraction. Videos still in flight or never
+  approved are not listed. It makes the pipeline's dedup guard visible — a video is never
+  reprocessed twice — and links each row through to that video's Claims. It has no actions.
 
 The Digest is just a notification that deep-links into the Web App's review queue; set
 `DIGEST_ENABLED=false` and the system stays fully usable with email off.

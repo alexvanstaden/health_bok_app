@@ -68,13 +68,11 @@ class ProcessedVideo:
     """A processed video Source for the Logs page (issue #33).
 
     A read-only record row: a video the pipeline has fully processed (Transcript +
-    Summary) — the existing "processed" definition (`processing_state.summarized_at`
-    set, the same set `processed_video_ids` dedups on). `bok_state` distinguishes
-    what actually reached the Body of Knowledge from what was processed but never
-    admitted: `admitted` (in the Body of Knowledge), `failed` (extraction errored),
-    or `pending` (everything still in flight or never approved). The Logs page is
-    labelled "Logs" by the owner's explicit choice — a known divergence from the
-    CONTEXT.md "Source" glossary.
+    Summary) that has reached a terminal admission. `bok_state` is `admitted` (it
+    reached the Body of Knowledge) or `failed` (extraction errored). Videos still in
+    flight or never acted on are not listed — the log shows only admitted or failed.
+    The Logs page is labelled "Logs" by the owner's explicit choice — a known
+    divergence from the CONTEXT.md "Source" glossary.
     """
 
     video_id: str
@@ -82,7 +80,7 @@ class ProcessedVideo:
     creator_name: str
     added_at: datetime
     summary: str
-    bok_state: str  # 'admitted' | 'failed' | 'pending'
+    bok_state: str  # 'admitted' | 'failed'
 
 
 @dataclass(frozen=True)
@@ -1009,34 +1007,34 @@ class Repository:
             ]
 
     def list_processed_videos(self) -> list[ProcessedVideo]:
-        """Every fully-processed video Source, newest-added first (issue #33).
+        """Processed videos that reached a terminal admission, newest-added first
+        (issue #33).
 
-        Backs the read-only Logs page: a record of what the pipeline has processed
-        into the Body of Knowledge. "Processed" is the existing definition — a video
-        with `summarized_at` stamped, the same set `processed_video_ids` dedups on —
-        so a video that was processed but never admitted (e.g. extraction failed)
-        still appears, distinguished by `bok_state`. One query: videos ⋈ creators ⋈
-        latest Summary ⋈ admission state. Ordered by `retrieved_at` (when the system
-        pulled it in — the "date added") so the newest record is first. `bok_state`
-        collapses the admission lifecycle to the three states the page shows:
-        `admitted`, `failed`, or `pending` (no row, or still in flight / declined).
+        Backs the read-only Logs page: a record of what the pipeline has carried into
+        the Body of Knowledge. A row appears only once a processed video (Transcript +
+        Summary archived) has reached a *terminal* admission state — `admitted` (in
+        the Body of Knowledge) or `failed` (extraction errored). Videos still in flight
+        or never acted on (no admission row, `approved`/`processing`/`rejected`) are
+        deliberately hidden: the owner asked the log to show only what was admitted or
+        failed, not the daily review backlog. One query: videos ⋈ creators ⋈ latest
+        Summary ⋈ admission state. Ordered by `retrieved_at` (when the system pulled it
+        in — the "date added") so the newest record is first; `bok_state` is the
+        admission state, always `admitted` or `failed` here.
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT v.video_id, v.title, cr.name, v.retrieved_at, s.body, "
-                "       CASE a.state "
-                "         WHEN 'admitted' THEN 'admitted' "
-                "         WHEN 'failed' THEN 'failed' "
-                "         ELSE 'pending' END AS bok_state "
+                "       a.state AS bok_state "
                 "FROM processing_state ps "
                 "JOIN videos v ON v.video_id = ps.video_id "
                 "JOIN creators cr ON cr.id = v.creator_id "
+                "JOIN admissions a ON a.video_id = v.video_id "
                 "JOIN LATERAL ("
                 "  SELECT body FROM summaries s WHERE s.video_id = v.video_id "
                 "  ORDER BY s.created_at DESC, s.id DESC LIMIT 1"
                 ") s ON TRUE "
-                "LEFT JOIN admissions a ON a.video_id = v.video_id "
                 "WHERE ps.summarized_at IS NOT NULL "
+                "  AND a.state IN ('admitted', 'failed') "
                 "ORDER BY v.retrieved_at DESC, v.video_id"
             )
             return [

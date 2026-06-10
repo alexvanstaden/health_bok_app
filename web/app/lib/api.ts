@@ -76,12 +76,11 @@ export function getVideoKnowledge(videoId: string): Promise<VideoKnowledge> {
   return json(`/api/videos/${videoId}/claims`);
 }
 
-// -- Logs: the record of every processed video Source (issue #33) -----------
-// A read-only list of every video the pipeline has processed into the Body of
-// Knowledge, newest-first. It makes the existing dedup guard (a video is never
-// reprocessed) visible; it has no actions. `bok_state` distinguishes what reached
-// the Body of Knowledge (admitted) from what was processed but never admitted
-// (failed / pending). Each row links to that video's existing Claims page.
+// -- Logs: the record of admitted/failed video Sources (issue #33) ----------
+// A read-only list of every video the pipeline carried to a terminal admission,
+// newest-first. `bok_state` is `admitted` (reached the Body of Knowledge) or
+// `failed` (extraction errored); videos still in flight or never approved are not
+// listed. It has no actions. Each row links to that video's existing Claims page.
 
 export type ProcessedVideo = {
   video_id: string;
@@ -89,7 +88,7 @@ export type ProcessedVideo = {
   creator: string;
   added_at: string;
   summary: string;
-  bok_state: "admitted" | "failed" | "pending";
+  bok_state: "admitted" | "failed";
 };
 
 export function listVideos(): Promise<{ videos: ProcessedVideo[] }> {
