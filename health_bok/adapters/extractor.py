@@ -1,4 +1,4 @@
-"""Claude adapter for the Extractor port (ADR-0010).
+"""Extractor adapter over the ChatModel seam (ADR-0010, ADR-0012).
 
 Turns one Transcript into the Body-of-Knowledge layer — Claims and Protocols with
 proposed Concept mentions — under the precision-first contract (ADR-0010):
@@ -11,8 +11,9 @@ proposed Concept mentions — under the precision-first contract (ADR-0010):
 
 The model is asked for strict JSON keyed to the `Extraction` shape; the locator is
 a seconds offset into the Transcript, so the admit step can deep-link back to the
-moment (`watch?v=ID&t=NNNs`). The SDK is imported lazily, so importing the package
-needs no anthropic install — the orchestrator only ever sees the `Extractor` port.
+moment (`watch?v=ID&t=NNNs`). The provider call goes through an injected
+`ChatModel`, so the adapter is provider-neutral — the orchestrator only ever sees
+the `Extractor` port and the factory picks OpenAI or Anthropic.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from ..models import (
     Extraction,
     FetchedTranscript,
 )
+from ..ports import ChatModel
 
 _MAX_TOKENS = 4096
 
@@ -56,34 +58,24 @@ _SYSTEM = (
 )
 
 
-class ClaudeExtractor:
-    """Extracts Claims and Protocols from a Transcript via the Claude API."""
+class ChatExtractor:
+    """Extracts Claims and Protocols from a Transcript via an injected `ChatModel`."""
 
-    def __init__(self, api_key: str, model: str):
-        import anthropic
-
-        self._client = anthropic.Anthropic(api_key=api_key)
-        self._model = model
+    def __init__(self, chat: ChatModel):
+        self._chat = chat
 
     def extract(self, transcript: FetchedTranscript) -> Extraction:
         prov = transcript.provenance
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=_MAX_TOKENS,
+        raw = self._chat.complete(
             system=_SYSTEM,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"Video: {prov.title}\n"
-                        f"Channel: {prov.channel_name}\n\n"
-                        f"Transcript (each line prefixed with its start second):\n"
-                        f"{_timestamped(transcript)}"
-                    ),
-                }
-            ],
+            user=(
+                f"Video: {prov.title}\n"
+                f"Channel: {prov.channel_name}\n\n"
+                f"Transcript (each line prefixed with its start second):\n"
+                f"{_timestamped(transcript)}"
+            ),
+            max_tokens=_MAX_TOKENS,
         )
-        raw = "".join(b.text for b in message.content if b.type == "text").strip()
         return parse_extraction(raw)
 
 

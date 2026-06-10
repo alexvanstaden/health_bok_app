@@ -27,10 +27,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import config, creators, curation, impacts, personal, query, review
-from .adapters.answerer import ClaudeQueryAnswerer
+from . import config, creators, curation, impacts, llm, personal, query, review
+from .adapters.answerer import ChatQueryAnswerer
 from .adapters.embedder import OpenAIEmbedder
-from .adapters.stance import ClaudeStanceJudge
+from .adapters.stance import ChatStanceJudge
 from .adapters.youtube import YouTubeContentSource
 from .concepts import ConceptNormalizer
 from .db import connect, init_schema
@@ -116,7 +116,7 @@ def _detect_anchor_impacts(repo: Repository, anchor_type: str, anchor_id: int) -
         impacts.detect_for_new_anchor(
             anchor_type,
             anchor_id,
-            judge=ClaudeStanceJudge(config.anthropic_api_key(), config.stance_model()),
+            judge=ChatStanceJudge(llm.chat_model(config.stance_model())),
             repo=repo,
             candidate_limit=config.impact_candidate_limit(),
         )
@@ -861,9 +861,7 @@ def ask(body: Question) -> dict:
         answer = query.answer_question(
             body.question,
             embedder=OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
-            answerer=ClaudeQueryAnswerer(
-                config.anthropic_api_key(), config.query_model()
-            ),
+            answerer=ChatQueryAnswerer(llm.chat_model(config.query_model())),
             repo=repo,
             model=config.embedding_model(),
             concept_limit=config.query_concept_limit(),
