@@ -119,8 +119,18 @@ export function triggerBackfill(
   return json(`/api/creators/${channelId}/backfill`, { method: "POST" });
 }
 
-export function listBackfillCandidates(): Promise<{ candidates: BackfillCandidate[] }> {
-  return json("/api/backfill");
+export type BackfillOrder = "newest" | "oldest";
+
+export function listBackfillCandidates(
+  order: BackfillOrder = "newest",
+): Promise<{ candidates: BackfillCandidate[] }> {
+  return json(`/api/backfill?order=${order}`);
+}
+
+// Lazily fetch one Candidate's real description + accurate publish date (issue #31):
+// one per-video extraction, persisted, so the queue shows them in place on demand.
+export function fetchBackfillDetails(videoId: string): Promise<BackfillCandidate> {
+  return json(`/api/backfill/${videoId}/fetch-details`, { method: "POST" });
 }
 
 export function rejectBackfillCandidates(videoIds: string[]): Promise<{ rejected: number }> {

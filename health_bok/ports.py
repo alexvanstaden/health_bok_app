@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from .models import (
+    CandidateDetails,
     CandidateMetadata,
     CreatorIdentity,
     Digest,
@@ -65,6 +66,17 @@ class ContentSource(Protocol):
         is also what lets a test assert the cutoff against a fake that returns
         the whole catalogue. Distinct from `discover_videos`, which surfaces only
         the latest handful for the daily diff.
+        """
+        ...
+
+    def fetch_candidate_details(self, video_id: str) -> CandidateDetails:
+        """Lazily fetch one backfill Candidate's real description + accurate date (issue #31).
+
+        A single per-video extraction that recovers what the cheap one-pass backfill
+        listing omits — the per-video description and the accurate publish date — run
+        *only* when the owner asks for it on a metadata-only Candidate, so the expensive
+        per-video fetch never enters the cheap Creator-add listing path (user story 29).
+        Still no Transcript and no Whisper: this stays metadata, just better metadata.
         """
         ...
 

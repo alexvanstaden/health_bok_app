@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 
 from health_bok.models import (
+    CandidateDetails,
     CandidateMetadata,
     CreatorIdentity,
     CreatorResolutionError,
@@ -41,9 +42,12 @@ class FakeContentSource:
     * `backcatalogue` maps a channel_id to the metadata-only CandidateMetadata
       list its back-catalogue listing returns — the whole catalogue, newest
       first, unfiltered, so the backfill caller (not the fake) honors the cutoff.
+    * `details` maps a video_id to the CandidateDetails its lazy per-video detail
+      fetch returns (issue #31) — the real description + accurate publish date.
 
     Calls are recorded (`discovered`, `fetched_video_ids`, `audio_fetched`,
-    `resolved`, `listed`) so tests can assert what the job did and did not touch.
+    `resolved`, `listed`, `details_fetched`) so tests can assert what the job did
+    and did not touch.
     """
 
     def __init__(
@@ -55,6 +59,7 @@ class FakeContentSource:
         audio: dict[str, FetchedAudio] | None = None,
         errors: dict[str, Exception] | None = None,
         backcatalogue: dict[str, list[CandidateMetadata]] | None = None,
+        details: dict[str, CandidateDetails] | None = None,
     ):
         self._transcript = transcript
         self._transcripts = dict(transcripts or {})
@@ -63,11 +68,13 @@ class FakeContentSource:
         self._errors = dict(errors or {})
         self._identities = dict(identities or {})
         self._backcatalogue = dict(backcatalogue or {})
+        self._details = dict(details or {})
         self.fetched_video_ids: list[str] = []
         self.audio_fetched: list[str] = []
         self.discovered: list[str] = []
         self.resolved: list[str] = []
         self.listed: list[str] = []
+        self.details_fetched: list[str] = []
 
     def resolve_creator(self, reference: str) -> CreatorIdentity:
         self.resolved.append(reference)
@@ -87,6 +94,12 @@ class FakeContentSource:
         if channel_id in self._errors:
             raise self._errors[channel_id]
         return list(self._backcatalogue.get(channel_id, []))
+
+    def fetch_candidate_details(self, video_id: str) -> CandidateDetails:
+        self.details_fetched.append(video_id)
+        if video_id in self._errors:
+            raise self._errors[video_id]
+        return self._details[video_id]
 
     def fetch_transcript(self, video_id: str) -> FetchedTranscript | None:
         self.fetched_video_ids.append(video_id)

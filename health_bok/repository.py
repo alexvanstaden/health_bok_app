@@ -657,8 +657,10 @@ class Repository:
                 for r in cur.fetchall()
             ]
 
-    def list_backfill_candidates(self) -> list[StoredCandidate]:
-        """Backfill Candidates awaiting the owner's decision, newest published first.
+    def list_backfill_candidates(
+        self, *, newest_first: bool = True
+    ) -> list[StoredCandidate]:
+        """Backfill Candidates awaiting the owner's decision, sorted by publish date.
 
         The Web App's backfill review queue (issue #15): metadata-only Candidates
         the owner can approve into the Body of Knowledge or bulk-reject. Mirrors
@@ -666,7 +668,12 @@ class Repository:
         rejected, and a `failed` one stays visible so it can be retried; approved
         and processing ones show their in-flight state. Each carries its Creator's
         name and current lifecycle `state`.
+
+        `newest_first` (the default) sorts most-recently-published first; pass False
+        to flip to oldest-first (issue #31). The sort is on `published_at`, which the
+        lazy detail fetch corrects, so the ordering sharpens as Candidates are fetched.
         """
+        direction = "DESC" if newest_first else "ASC"
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT c.video_id, cr.channel_id, c.title, c.description, c.url, "
@@ -676,7 +683,7 @@ class Repository:
                 "LEFT JOIN admissions a ON a.video_id = c.video_id "
                 "WHERE COALESCE(a.state, %s) IN "
                 "      (%s, 'approved', 'processing', 'failed') "
-                "ORDER BY c.published_at DESC, c.video_id",
+                f"ORDER BY c.published_at {direction}, c.video_id",
                 (CANDIDATE, CANDIDATE, CANDIDATE),
             )
             return [
@@ -692,6 +699,35 @@ class Repository:
                 )
                 for r in cur.fetchall()
             ]
+
+    def get_backfill_candidate(self, video_id: str) -> StoredCandidate | None:
+        """One backfill Candidate by video_id, or None — the single-row read for the
+        lazy detail fetch (issue #31), so the API can return the just-updated Candidate
+        in the same shape the queue lists. Mirrors `list_backfill_candidates`' join for
+        the Creator name and lifecycle `state`, but is not filtered by state."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.video_id, cr.channel_id, c.title, c.description, c.url, "
+                "       c.published_at, cr.name, COALESCE(a.state, %s) AS state "
+                "FROM candidates c "
+                "JOIN creators cr ON cr.id = c.creator_id "
+                "LEFT JOIN admissions a ON a.video_id = c.video_id "
+                "WHERE c.video_id = %s",
+                (CANDIDATE, video_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return StoredCandidate(
+            video_id=row[0],
+            channel_id=row[1],
+            title=row[2],
+            description=row[3],
+            url=row[4],
+            published_at=row[5],
+            channel_name=row[6],
+            state=row[7],
+        )
 
     def processed_video_ids(self) -> set[str]:
         """The set of videos whose Transcript and Summary are both persisted.
@@ -806,6 +842,26 @@ class Repository:
                     candidate.description,
                     candidate.published_at,
                 ),
+            )
+            return cur.rowcount > 0
+
+    def update_candidate_details(
+        self, video_id: str, *, description: str, published_at: datetime
+    ) -> bool:
+        """Persist a lazily-fetched description + accurate publish date on a Candidate.
+
+        The write half of the lazy detail fetch (issue #31): overwrites the Candidate's
+        best-effort description and publish date with the real ones from a per-video
+        extraction. Idempotent and safe to re-run — it updates the existing row in place,
+        never inserting a duplicate — so a Candidate that already has details is simply
+        refreshed. Returns whether a row matched. Does not commit — the caller owns the
+        transaction.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE candidates SET description = %s, published_at = %s "
+                "WHERE video_id = %s",
+                (description, published_at, video_id),
             )
             return cur.rowcount > 0
 

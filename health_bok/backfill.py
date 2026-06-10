@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from .config import DEFAULT_BACKFILL_CUTOFF_DAYS
 from .ports import ContentSource
-from .repository import Repository
+from .repository import Repository, StoredCandidate
 
 logger = logging.getLogger("health_bok.backfill")
 
@@ -59,3 +59,29 @@ def backfill_candidates(
             stored.append(candidate.video_id)
     logger.info("backfilled %d new candidate(s) for %s", len(stored), channel_id)
     return stored
+
+
+def fetch_candidate_details(
+    video_id: str,
+    *,
+    content_source: ContentSource,
+    repo: Repository,
+) -> StoredCandidate | None:
+    """Lazily fetch + persist one backfill Candidate's real description and date (issue #31).
+
+    Lets the owner pull the per-video detail the cheap one-pass listing omitted, on
+    demand, for a single Candidate: one per-video extraction obtains the real
+    description and the accurate publish date, both are stored on the Candidate, then
+    it commits and returns the updated Candidate so the Web App can show them in place.
+    Idempotent and safe to re-run — a Candidate that already carries details is updated,
+    not duplicated. Returns ``None`` if no Candidate with that video_id exists, so the
+    caller can answer 404; the expensive fetch is skipped in that case.
+    """
+    if repo.get_backfill_candidate(video_id) is None:
+        return None
+    details = content_source.fetch_candidate_details(video_id)
+    repo.update_candidate_details(
+        video_id, description=details.description, published_at=details.published_at
+    )
+    repo.commit()
+    return repo.get_backfill_candidate(video_id)

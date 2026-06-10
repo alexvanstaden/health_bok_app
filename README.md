@@ -90,7 +90,7 @@ while Postgres stays real:
 
 | Port            | Real adapter (`health_bok/adapters/`) | Service             |
 | --------------- | ------------------------------------- | ------------------- |
-| `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, lists the back-catalogue for backfill Candidates, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
+| `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, lists the back-catalogue for backfill Candidates, lazily fetches one Candidate's full description + accurate publish date on demand, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
 | `Transcriber`   | `whisper.py`                          | OpenAI Whisper — transcribes a caption-less video's audio (daily path only) |
 | `Summarizer`    | `claude.py` (single pass), wrapped by `summarizer.py` (map-reduce for long Transcripts) | Claude API          |
 | `DigestSender`  | `resend.py`                           | Resend              |
@@ -231,6 +231,13 @@ thumbnail, title, description, publish date, and URL — no Transcript fetched, 
 called. Re-adding a Creator, or hitting **Backfill** in the Web App, only tops up
 newly-published ones. These Candidates await approval in the Web App's *Backfill* tab; on
 approval the worker acquires a Transcript (free captions, else Whisper) before extraction.
+
+The back-catalogue is listed in one cheap pass, which carries no per-video description and
+only a best-effort publish date. Each Candidate therefore has a **Fetch details** action: it
+runs a single per-video lookup that loads the real description and the accurate publish date,
+stores both, and shows them in place — the expensive per-video call happens only when you ask.
+The *Backfill* tab can be **sorted by publish date** (newest- or oldest-first), and the
+ordering sharpens for any Candidate whose details you've fetched.
 
 ## Schedule the daily job
 

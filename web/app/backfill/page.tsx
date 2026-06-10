@@ -6,11 +6,18 @@
 // they need more, bulk-rejects obvious noise, or approves. Approving runs the very
 // same pipeline as a daily Candidate (the worker transcribes-if-needed, then
 // extracts and admits), so the queue polls to show each Candidate's state walk.
+//
+// The cheap single-pass listing leaves a Candidate without a description and with
+// only a best-effort publish date, so each row carries a "Fetch details" action
+// that pulls the real description + accurate date on demand (issue #31), and the
+// queue can be sorted by publish date, newest- or oldest-first.
 
 import { useCallback, useEffect, useState } from "react";
 import {
   BackfillCandidate,
+  BackfillOrder,
   approveCandidate,
+  fetchBackfillDetails,
   listBackfillCandidates,
   rejectBackfillCandidates,
 } from "../lib/api";
@@ -18,13 +25,15 @@ import {
 export default function BackfillQueue() {
   const [candidates, setCandidates] = useState<BackfillCandidate[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [order, setOrder] = useState<BackfillOrder>("newest");
+  const [fetching, setFetching] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const { candidates } = await listBackfillCandidates();
+      const { candidates } = await listBackfillCandidates(order);
       setCandidates(candidates);
       setError(null);
     } catch (e) {
@@ -32,10 +41,11 @@ export default function BackfillQueue() {
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [order]);
 
   // Poll so worker-driven state transitions (approved → processing → admitted)
   // become visible, and approved/admitted Candidates drop out of the queue.
+  // Re-subscribes when the sort order changes so the new order takes effect at once.
   useEffect(() => {
     refresh();
     const id = setInterval(refresh, 3000);
@@ -59,6 +69,27 @@ export default function BackfillQueue() {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Lazily fetch one Candidate's real description + accurate date (issue #31). The
+  // returned, updated Candidate is patched into the list in place; the poll would
+  // also pick it up since it is persisted, but the immediate swap is snappier.
+  async function fetchDetails(videoId: string) {
+    setFetching((prev) => new Set(prev).add(videoId));
+    try {
+      const updated = await fetchBackfillDetails(videoId);
+      setCandidates((prev) =>
+        prev.map((c) => (c.video_id === videoId ? updated : c)),
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setFetching((prev) => {
+        const next = new Set(prev);
+        next.delete(videoId);
+        return next;
+      });
     }
   }
 
@@ -91,6 +122,17 @@ export default function BackfillQueue() {
         >
           Reject selected ({selected.size})
         </button>
+        <span className="spacer" />
+        <label className="muted">
+          Sort:{" "}
+          <select
+            value={order}
+            onChange={(e) => setOrder(e.target.value as BackfillOrder)}
+          >
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+          </select>
+        </label>
       </div>
 
       {error && <p className="error">API error: {error}</p>}
@@ -122,7 +164,11 @@ export default function BackfillQueue() {
               <p className="meta muted">
                 {c.channel_name} · {new Date(c.published_at).toLocaleDateString()}
               </p>
-              {c.description && <p className="summary">{c.description}</p>}
+              {c.description ? (
+                <p className="summary">{c.description}</p>
+              ) : (
+                <p className="summary muted">No description yet — fetch details to load it.</p>
+              )}
               <div className="row">
                 <button
                   className="primary"
@@ -130,6 +176,12 @@ export default function BackfillQueue() {
                   onClick={() => approve(c.video_id)}
                 >
                   Approve
+                </button>
+                <button
+                  disabled={fetching.has(c.video_id)}
+                  onClick={() => fetchDetails(c.video_id)}
+                >
+                  {fetching.has(c.video_id) ? "Fetching…" : "Fetch details"}
                 </button>
                 <span className="spacer" />
                 <a href={c.url} target="_blank" rel="noreferrer">
