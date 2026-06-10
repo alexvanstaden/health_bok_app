@@ -9,6 +9,7 @@
 services:
   db:
     image: pgvector/pgvector:pg16  # Postgres + the `vector` extension (ADR-0008)
+    restart: unless-stopped
     environment:
       POSTGRES_USER: health
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-health}
@@ -23,6 +24,7 @@ services:
 
   api:
     build: .
+    restart: unless-stopped
     command: ["uvicorn", "health_bok.api:app", "--host", "0.0.0.0", "--port", "8000"]
     # The API needs the LLM keys at request time: OPENAI_API_KEY to embed Concept
     # mentions (personal-layer writes, issue #16) and the query question, and
@@ -39,6 +41,9 @@ services:
 
   worker:
     build: .
+    # The worker drains the admission queue; a transient crash (a DB hiccup, a bad
+    # job) must not leave it dead, or approvals queue up untouched. Restart it.
+    restart: unless-stopped
     command: ["health-bok", "worker"]
     env_file: .env
     environment:
@@ -49,6 +54,7 @@ services:
 
   web:
     build: ./web
+    restart: unless-stopped
     environment:
       # The browser reaches the API over the tailnet; override for your host.
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
@@ -62,6 +68,7 @@ services:
   # and WEBAPP_BASE_URL in .env to control the notification email (ADR-0007).
   pipeline:
     build: .
+    restart: unless-stopped
     command: ["sh", "-c", "while true; do health-bok run || true; sleep 86400; done"]
     env_file: .env
     environment:

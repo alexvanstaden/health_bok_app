@@ -183,7 +183,10 @@ class YouTubeContentSource:
             )
 
         try:
-            raw = YouTubeTranscriptApi.get_transcript(video_id)
+            # 1.x replaced the static `get_transcript(...)` with an instance
+            # `fetch(...)` returning snippet objects (`.text`/`.start`/`.duration`),
+            # not dicts.
+            raw = YouTubeTranscriptApi().fetch(video_id)
         except (TranscriptsDisabled, NoTranscriptFound):
             # No captions for this video — signal absence so the caller falls
             # back to Whisper. A genuine fetch failure still raises and is
@@ -191,11 +194,11 @@ class YouTubeContentSource:
             return None
         return [
             TranscriptSegment(
-                text=entry["text"],
-                start=float(entry["start"]),
-                duration=float(entry.get("duration", 0.0)),
+                text=snippet.text,
+                start=float(snippet.start),
+                duration=float(getattr(snippet, "duration", 0.0)),
             )
-            for entry in raw
+            for snippet in raw
         ]
 
 
