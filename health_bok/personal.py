@@ -34,7 +34,7 @@ from datetime import datetime
 
 from .concepts import ConceptNormalizer
 from .models import ConceptMention
-from .ports import Embedder
+from .ports import ConceptProposer, Embedder
 from .repository import Goal, NearestConcept, Repository, SuggestedLink
 
 logger = logging.getLogger("health_bok.personal")
@@ -47,6 +47,12 @@ logger = logging.getLogger("health_bok.personal")
 # path only ever proposes Concepts that already exist — no minting, no LLM.
 SUGGEST_MAX_DISTANCE = 0.6
 SUGGEST_LIMIT = 8
+
+# Cap on new-Concept suggestions surfaced for a Goal (issue #39). The LLM proposes
+# candidate terms from the Goal's title + detail; the genuinely new ones (those that
+# don't resolve to an existing Concept) are capped here so the page proposes a
+# curatable handful rather than a scattershot. Minting stays owner-confirmed.
+NEW_CONCEPT_SUGGEST_LIMIT = 6
 
 # How each link target maps onto an `edges` row. `out` means the Decision is the
 # edge's source (decision → protocol/goal/marker); `in` means it is the
@@ -172,6 +178,62 @@ def suggest_goal_concepts(
     )
     suggestions = [c for c in nearest if c.concept_id not in attached]
     return suggestions[:limit]
+
+
+def suggest_new_goal_concepts(
+    goal_id: int,
+    *,
+    proposer: ConceptProposer,
+    normalizer: ConceptNormalizer,
+    repo: Repository,
+    limit: int = NEW_CONCEPT_SUGGEST_LIMIT,
+) -> list[str]:
+    """New (not-yet-existing) Concept terms a Goal concerns, for owner-curated
+    minting (issue #39).
+
+    The companion to `suggest_goal_concepts`: where that proposes Concepts that
+    *already exist*, this proposes ones to **add**. An LLM pass reads the Goal's
+    title + detail and proposes candidate terms; each is checked against the existing
+    catalogue with the *same* conservative merge/adjudicate logic `ConceptNormalizer`
+    uses (`normalizer.match`), and only a term that resolves to *no* existing Concept
+    is surfaced — so the system never offers a near-duplicate of a hub it already has
+    (a candidate that does resolve is dropped; the existing-Concept suggester covers
+    those). Because the check shares the exact decision `resolve` makes, every term
+    returned here is one that confirming — an attach through `attach_goal_concept`
+    (issue #37) — will actually mint and attach. Nothing is minted here: this is
+    read-only, the propose half of suggest-then-confirm, and the owner curates.
+
+    Degrades gracefully: a missing Goal, or an LLM failure, yields an empty list —
+    the existing-Concept path (a separate, deterministic call) keeps working and the
+    Goal page never breaks. Terms are de-duplicated case-insensitively and capped at
+    `limit`. Read-only: owns no transaction.
+    """
+    goal = repo.get_goal(goal_id)
+    if goal is None:
+        return []
+    try:
+        candidates = proposer.propose(goal.title, goal.detail)
+    except Exception:
+        logger.exception("concept proposer failed for goal %s", goal_id)
+        return []
+
+    new_terms: list[str] = []
+    seen: set[str] = set()
+    for term in candidates:
+        term = term.strip()
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        # Conservative, and the same decision the confirm will make: a term that
+        # resolves to an existing Concept is not "new" — drop it, no duplicate hub.
+        if normalizer.match(ConceptMention(name=term)) is None:
+            new_terms.append(term)
+        if len(new_terms) >= limit:
+            break
+    return new_terms
 
 
 def _goal_text(goal: Goal) -> str:

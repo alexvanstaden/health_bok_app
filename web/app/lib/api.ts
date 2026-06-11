@@ -417,6 +417,20 @@ export function goalConceptSuggestions(
   return json(`/api/goals/${id}/concept-suggestions`);
 }
 
+// A NEW Concept to mint for a Goal, proposed by an LLM from its title + detail
+// (issue #39). The companion to goalConceptSuggestions: these terms resolve to no
+// existing Concept (checked with the same conservative ConceptNormalizer logic), so
+// confirming one mints the Concept and attaches it — through the same
+// attachGoalConcept (issue #37). Nothing is minted until the owner confirms; an LLM
+// failure yields an empty list, leaving the existing-Concept suggestions intact.
+export type NewConceptSuggestion = { name: string };
+
+export function goalNewConceptSuggestions(
+  id: number,
+): Promise<{ suggestions: NewConceptSuggestion[] }> {
+  return json(`/api/goals/${id}/new-concept-suggestions`);
+}
+
 export function listMarkers(): Promise<{ markers: MarkerSeries[] }> {
   return json("/api/markers");
 }

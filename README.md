@@ -58,8 +58,11 @@ boundary. In it you:
 - **Record the personal layer.** **Goals** (intentions or risks and the Concepts they
   concern — editable on the Goal's page after creation, by picking from the catalogue or
   typing a new term normalized onto one canonical Concept set; the page also suggests
-  existing Concepts the Goal likely concerns, inferred from its title + detail over
-  pgvector and confirmable in one click; unmet ones flagged),
+  Concepts the Goal likely concerns, inferred from its title + detail — *existing* ones
+  matched over pgvector, and *new* ones an LLM proposes that resolve to nothing in the
+  catalogue, the two set apart in the UI and each confirmable in one click (confirming a
+  new one mints the Concept; nothing is minted without your confirmation); unmet Goals
+  flagged),
   **Markers** (append-only dated readings per Concept, with
   out-of-range *derived* from the stored reference range and a viewable history series), and
   **Decisions** (time-bound adoptions carrying your *own* actual parameters, so deviation
@@ -108,6 +111,7 @@ while Postgres stays real:
 | `Embedder`      | `embedder.py`                         | OpenAI `text-embedding-3-small` — 1536-d vectors for Concept normalization |
 | `QueryAnswerer` | `answerer.py`                         | Claude API — retrieved evidence → a grounded, cited answer or an abstention |
 | `StanceJudge`   | `stance.py`                           | Claude API — one knowledge↔anchor pair → a Stance for change detection |
+| `ConceptProposer` | `concept_proposer.py`               | Claude API — a Goal's title + detail → candidate new-Concept terms (owner-confirmed before minting) |
 
 ```
 health_bok/
@@ -173,6 +177,7 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `QUERY_MAX_DISTANCE`       | Cosine-distance abstention cutoff for query retrieval (default `0.6`) |
 | `STANCE_MODEL`             | Claude model for the Impact StanceJudge (default `claude-sonnet-4-6`) |
 | `IMPACT_CANDIDATE_LIMIT`   | Per-category cap on candidates a detection pass judges (default `25`) |
+| `CONCEPT_PROPOSAL_MODEL`   | Claude model for proposing new Concepts for a Goal (default `claude-sonnet-4-6`) |
 
 ## Run the pipeline
 

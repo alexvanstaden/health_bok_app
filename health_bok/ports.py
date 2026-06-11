@@ -194,6 +194,31 @@ class QueryAnswerer(Protocol):
 
 
 @runtime_checkable
+class ConceptProposer(Protocol):
+    """Proposes candidate Concept *terms* a Goal concerns, for owner-curated minting
+    (issue #39).
+
+    The LLM half of the "when should a new Concept be added?" assist: given a Goal's
+    title + detail, return short canonical Concept names the Goal is about. It only
+    *proposes* — each term is then checked against the existing catalogue with the
+    same conservative logic `ConceptNormalizer` uses, so a term that resolves to an
+    existing Concept is dropped and only a genuinely new one is surfaced as an "add
+    new Concept?" suggestion the owner confirms. The model never mints a Concept; the
+    approval gate stays with the owner (ADR-0004).
+
+    The Claude API in production; behind its own port so the suggester is driven in
+    tests with a fake over a *real* Postgres catalogue (PRD #1 testing decisions),
+    and so a model failure degrades to "no new suggestions" without touching the
+    existing-Concept path.
+    """
+
+    def propose(self, title: str, detail: str | None) -> list[str]:
+        """Return candidate Concept terms for a Goal — short canonical names, no
+        prose. An empty list is a valid answer (the Goal suggests no new Concept)."""
+        ...
+
+
+@runtime_checkable
 class StanceJudge(Protocol):
     """Judges the Stance of one knowledge↔anchor pair for change detection (issue #18).
 

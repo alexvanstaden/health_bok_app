@@ -283,6 +283,35 @@ class FakeStanceJudge:
         return self._stances.get(anchor.text, self._default)
 
 
+class FakeConceptProposer:
+    """Fakes the ConceptProposer port (issue #39): returns canned candidate terms for
+    a Goal, or raises — so the new-Concept suggester is driven over a *real* Postgres
+    catalogue without the Claude API.
+
+    Pass `concepts` (the terms to propose for every Goal) or an `error` to raise, so
+    the graceful-degrade path — an LLM failure yielding no new suggestions while the
+    existing-Concept path keeps working — can be exercised. Records each
+    `(title, detail)` it was asked, so a test can assert the Goal's title + detail
+    reached the proposer.
+    """
+
+    def __init__(
+        self,
+        concepts: list[str] | None = None,
+        *,
+        error: Exception | None = None,
+    ):
+        self._concepts = list(concepts or [])
+        self._error = error
+        self.calls: list[tuple[str, str | None]] = []
+
+    def propose(self, title: str, detail: str | None) -> list[str]:
+        self.calls.append((title, detail))
+        if self._error is not None:
+            raise self._error
+        return list(self._concepts)
+
+
 def _synthesize(question: str, evidence: RetrievedEvidence) -> str:
     """A canned synthesized answer woven from the retrieved Claims (not a list)."""
     return "Based on your library: " + " ".join(c.text for c in evidence.claims)
