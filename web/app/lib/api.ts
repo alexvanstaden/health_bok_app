@@ -405,6 +405,18 @@ export function detachGoalConcept(id: number, conceptId: number) {
   return json(`/api/goals/${id}/concepts/${conceptId}`, { method: "DELETE" });
 }
 
+// An existing Concept a Goal likely concerns, inferred from its title + detail over
+// pgvector (issue #38). Conservative: every suggestion already exists in the
+// catalogue (none minted) and one already attached is never suggested. Confirm one
+// in a single click through attachGoalConcept (issue #37).
+export type ConceptSuggestion = { concept_id: number; name: string; distance: number };
+
+export function goalConceptSuggestions(
+  id: number,
+): Promise<{ suggestions: ConceptSuggestion[] }> {
+  return json(`/api/goals/${id}/concept-suggestions`);
+}
+
 export function listMarkers(): Promise<{ markers: MarkerSeries[] }> {
   return json("/api/markers");
 }

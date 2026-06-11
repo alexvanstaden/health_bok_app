@@ -57,7 +57,9 @@ boundary. In it you:
   Candidate runs the *same* pipeline as a daily one (transcribing-if-needed first).
 - **Record the personal layer.** **Goals** (intentions or risks and the Concepts they
   concern — editable on the Goal's page after creation, by picking from the catalogue or
-  typing a new term normalized onto one canonical Concept set; unmet ones flagged),
+  typing a new term normalized onto one canonical Concept set; the page also suggests
+  existing Concepts the Goal likely concerns, inferred from its title + detail over
+  pgvector and confirmable in one click; unmet ones flagged),
   **Markers** (append-only dated readings per Concept, with
   out-of-range *derived* from the stored reference range and a viewable history series), and
   **Decisions** (time-bound adoptions carrying your *own* actual parameters, so deviation

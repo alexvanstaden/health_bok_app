@@ -34,9 +34,19 @@ from datetime import datetime
 
 from .concepts import ConceptNormalizer
 from .models import ConceptMention
-from .repository import Repository, SuggestedLink
+from .ports import Embedder
+from .repository import Goal, NearestConcept, Repository, SuggestedLink
 
 logger = logging.getLogger("health_bok.personal")
+
+# Suggestion knobs for existing-Concept suggestions on a Goal (issue #38). The
+# Goal's text is embedded and matched against the existing Concept embeddings over
+# pgvector; only Concepts within this cosine distance are proposed, so a Goal whose
+# text matches nothing in the catalogue yields no suggestions rather than latching
+# onto the merely least-distant Concept. Conservative by design (ADR-0008): this
+# path only ever proposes Concepts that already exist — no minting, no LLM.
+SUGGEST_MAX_DISTANCE = 0.6
+SUGGEST_LIMIT = 8
 
 # How each link target maps onto an `edges` row. `out` means the Decision is the
 # edge's source (decision → protocol/goal/marker); `in` means it is the
@@ -125,6 +135,52 @@ def detach_goal_concept(goal_id: int, *, concept_id: int, repo: Repository) -> b
     else:
         repo.rollback()
     return removed
+
+
+def suggest_goal_concepts(
+    goal_id: int,
+    *,
+    embedder: Embedder,
+    repo: Repository,
+    model: str,
+    limit: int = SUGGEST_LIMIT,
+    max_distance: float = SUGGEST_MAX_DISTANCE,
+) -> list[NearestConcept]:
+    """Existing Concepts a Goal most likely concerns, for one-click attach (#38).
+
+    The suggest half of suggest-then-confirm on the deterministic path: the Goal's
+    title + detail are embedded and matched against the existing Concept embeddings
+    over pgvector (`nearest_concepts`), the *same* retrieval normalization and the
+    Impact engine use (ADR-0008). So every suggestion resolves to a Concept that
+    *already exists* — none is minted and the LLM is never called. Concepts already
+    attached to the Goal are excluded, so confirming a suggestion (through
+    `attach_goal_concept`, issue #37) drops it from the next pass. A Goal whose text
+    matches nothing within `max_distance` — or one with no text — yields an empty
+    list, not an error. Read-only: owns no transaction.
+    """
+    goal = repo.get_goal(goal_id)
+    if goal is None:
+        return []
+    text = _goal_text(goal)
+    if not text:
+        return []
+    embedding = embedder.embed(text)
+    attached = set(repo.concept_ids_for("goal", goal_id))
+    # Over-fetch by the attached count so excluding them can never starve the list.
+    nearest = repo.nearest_concepts(
+        embedding, model=model, limit=limit + len(attached), max_distance=max_distance
+    )
+    suggestions = [c for c in nearest if c.concept_id not in attached]
+    return suggestions[:limit]
+
+
+def _goal_text(goal: Goal) -> str:
+    """The text a Goal's Concept suggestions are inferred from — its title and
+    detail (issue #38), the same words the owner described the Goal with."""
+    parts = [goal.title]
+    if goal.detail:
+        parts.append(goal.detail)
+    return "\n".join(p.strip() for p in parts if p and p.strip())
 
 
 # -- Markers ----------------------------------------------------------------

@@ -45,6 +45,7 @@ from .repository import (
     Impact,
     MarkerReading,
     MarkerSeries,
+    NearestConcept,
     Repository,
     SuggestedLink,
 )
@@ -704,6 +705,10 @@ def _suggestion_dict(s: SuggestedLink) -> dict:
     }
 
 
+def _concept_suggestion_dict(c: NearestConcept) -> dict:
+    return {"concept_id": c.concept_id, "name": c.name, "distance": c.distance}
+
+
 # -- Goals ------------------------------------------------------------------
 
 
@@ -785,6 +790,30 @@ def detach_goal_concept(goal_id: int, concept_id: int) -> dict:
     if not removed:
         raise HTTPException(status_code=404, detail="concept not attached to goal")
     return {"goal_id": goal_id, "detached": True}
+
+
+@app.get("/api/goals/{goal_id}/concept-suggestions")
+def goal_concept_suggestions(goal_id: int) -> dict:
+    """Existing Concepts a Goal likely concerns, inferred from its title + detail
+    (issue #38).
+
+    Embedding-driven and conservative (ADR-0008): the Goal's text is matched against
+    the existing Concept embeddings over pgvector, so every suggestion is a Concept
+    that already exists — none minted, the LLM untouched — and Concepts already
+    attached are excluded. Each is confirmable in one click through the attach
+    endpoint (#37). A Goal whose text matches nothing yields an empty list.
+    """
+    model = config.embedding_model()
+    with _repo() as repo:
+        if repo.get_goal(goal_id) is None:
+            raise HTTPException(status_code=404, detail="goal not found")
+        suggestions = personal.suggest_goal_concepts(
+            goal_id,
+            embedder=OpenAIEmbedder(config.openai_api_key(), model),
+            repo=repo,
+            model=model,
+        )
+    return {"suggestions": [_concept_suggestion_dict(s) for s in suggestions]}
 
 
 # -- Markers ----------------------------------------------------------------
