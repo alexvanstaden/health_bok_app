@@ -25,9 +25,10 @@ import pytest
 
 from health_bok import personal, review
 from health_bok.repository import Repository
-from tests.fakes import FakeExtractor
+from tests.fakes import FakeEmbedder, FakeExtractor
 from tests.seed import seed_processed_video
 from tests.test_admission import (
+    EMBED_MODEL,
     RAPAMYCIN_CLAIM,
     drain_daily,
     make_extraction,
@@ -166,6 +167,66 @@ def test_edit_goal_concepts_attach_detach_and_normalize(conn, postgres_url):
         goal_id, concept_id=existing["rapamycin"].id, repo=repo
     ) is False
     assert "rapamycin" in _concepts_by_name(repo)
+
+
+def test_suggest_existing_concepts_for_a_goal(conn):
+    """Suggest existing Concepts a Goal likely concerns, for one-click attach (#38).
+
+    The deterministic suggest half of suggest-then-confirm: the Goal's text is
+    embedded and matched against the existing Concept embeddings over pgvector, so
+    every suggestion already exists (no minting, no LLM) and an attached Concept is
+    never re-suggested. The Goal-text vectors are placed at chosen cosine distances
+    from the BoK Concepts, the same controlled-vector trick normalization tests use.
+    """
+    repo = Repository(conn)
+    _admit_bok(repo)  # mints the BoK Concepts (incl. rapamycin, creatine monohydrate)
+    norm = normalizer(repo)
+
+    goal_id = personal.record_goal(
+        title="Lower cardiovascular risk", detail=None, concepts=[],
+        normalizer=norm, repo=repo,
+    )
+    # The suggester embeds the Goal's text; the BoK Concept embeddings were minted at
+    # admit (CONCEPT_VECTORS). Place this Goal near rapamycin [..1..] and creatine
+    # [...1.], orthogonal (and so far) from the other three Concepts.
+    embedder = FakeEmbedder({
+        "Lower cardiovascular risk": [0, 0, 1, 1, 0],
+        "Train for a marathon": [0, 0, 0, 0, 0, 1],  # orthogonal to every Concept
+    })
+
+    before = len(repo.list_concepts())
+    suggestions = personal.suggest_goal_concepts(
+        goal_id, embedder=embedder, repo=repo, model=EMBED_MODEL
+    )
+    # Every suggestion resolves to an *existing* Concept and the catalogue did not
+    # grow — this path never mints a Concept or calls the LLM.
+    existing = _concepts_by_name(repo)
+    assert len(repo.list_concepts()) == before
+    assert {s.name for s in suggestions} == {"rapamycin", "creatine monohydrate"}
+    assert all(s.concept_id == existing[s.name].id for s in suggestions)
+
+    # Already-attached Concepts are never suggested: confirm one (the #37 attach) and
+    # it drops out of the next pass, leaving the other.
+    assert personal.attach_goal_concept(
+        goal_id, name="rapamycin", normalizer=norm, repo=repo
+    ) is True
+    after = personal.suggest_goal_concepts(
+        goal_id, embedder=embedder, repo=repo, model=EMBED_MODEL
+    )
+    assert {s.name for s in after} == {"creatine monohydrate"}
+
+    # A Goal whose text matches nothing within the cutoff yields an empty list, not
+    # an error — and a missing Goal is a clean empty list too.
+    barren = personal.record_goal(
+        title="Train for a marathon", detail=None, concepts=[],
+        normalizer=norm, repo=repo,
+    )
+    assert personal.suggest_goal_concepts(
+        barren, embedder=embedder, repo=repo, model=EMBED_MODEL
+    ) == []
+    assert personal.suggest_goal_concepts(
+        9999, embedder=embedder, repo=repo, model=EMBED_MODEL
+    ) == []
 
 
 def test_attach_goal_concept_rejects_empty_and_missing_goal(conn):

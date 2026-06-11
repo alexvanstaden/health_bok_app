@@ -9,18 +9,24 @@
 // existing catalogue or typing a term that isn't in it — normalized server-side
 // through the same ConceptNormalizer the create form and admit pipeline use, so the
 // personal layer and the Body of Knowledge keep one canonical Concept set — and
-// detach an attached one. Each persists as a `references` edge. This is the
-// attach/detach the suggest-then-confirm slices that follow will call.
+// detach an attached one. Each persists as a `references` edge.
+//
+// The page also suggests existing Concepts the Goal likely concerns (issue #38),
+// inferred from its title + detail over pgvector. Each suggestion is an existing
+// Concept (never minted, no LLM) the Goal isn't already attached to, confirmable in
+// one click — the confirm half of suggest-then-confirm, reusing the #37 attach.
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   BokConcept,
+  ConceptSuggestion,
   Goal,
   attachGoalConcept,
   deleteGoal,
   detachGoalConcept,
   getGoal,
+  goalConceptSuggestions,
   listConcepts,
 } from "../../lib/api";
 
@@ -29,18 +35,21 @@ export default function GoalDetail({ params }: { params: { id: string } }) {
   const router = useRouter();
   const [goal, setGoal] = useState<Goal | null>(null);
   const [catalogue, setCatalogue] = useState<BokConcept[]>([]);
+  const [suggestions, setSuggestions] = useState<ConceptSuggestion[]>([]);
   const [term, setTerm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [g, { concepts }] = await Promise.all([
+      const [g, { concepts }, { suggestions: sugg }] = await Promise.all([
         getGoal(id),
         listConcepts({}),
+        goalConceptSuggestions(id),
       ]);
       setGoal(g);
       setCatalogue(concepts);
+      setSuggestions(sugg);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -58,6 +67,20 @@ export default function GoalDetail({ params }: { params: { id: string } }) {
     try {
       await attachGoalConcept(id, name);
       setTerm("");
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // One-click confirm of a suggested existing Concept — the same attach the manual
+  // add uses (issue #37); the next load drops it from the suggestions.
+  async function confirmSuggestion(name: string) {
+    setBusy(true);
+    try {
+      await attachGoalConcept(id, name);
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -166,6 +189,26 @@ export default function GoalDetail({ params }: { params: { id: string } }) {
                 Add
               </button>
             </div>
+
+            {/* Suggested existing Concepts (issue #38), inferred from the Goal's
+                title + detail. Each is an existing Concept the Goal isn't already
+                attached to — confirm one in a click. Empty when nothing matches. */}
+            {suggestions.length > 0 && (
+              <div style={{ marginTop: "0.75rem" }}>
+                <h4 className="muted">Suggested Concepts</h4>
+                {suggestions.map((s) => (
+                  <button
+                    key={s.concept_id}
+                    className="link-pill"
+                    disabled={busy}
+                    title={`distance ${s.distance.toFixed(3)}`}
+                    onClick={() => confirmSuggestion(s.name)}
+                  >
+                    + {s.name}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}
