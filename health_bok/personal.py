@@ -84,6 +84,49 @@ def delete_goal(goal_id: int, *, repo: Repository) -> bool:
     return deleted
 
 
+def attach_goal_concept(
+    goal_id: int, *, name: str, normalizer: ConceptNormalizer, repo: Repository
+) -> bool:
+    """Attach a Concept to a Goal by normalized term (issue #37).
+
+    The owner picks a Concept from the catalogue or types a term that isn't in it;
+    either way the term is resolved through the *same* `ConceptNormalizer` the
+    create form and admit pipeline use, so an existing Concept is reused and a
+    genuinely new one minted — the personal layer and the Body of Knowledge keep one
+    canonical Concept set (CONTEXT.md "Concept"). Asserts a `references` edge from
+    the Goal to the Concept, idempotently: re-adding an already-attached Concept does
+    not duplicate the edge (the `edges` unique constraint dedupes). Returns ``False``
+    if the Goal is gone; raises `ValueError` for an empty term.
+    """
+    name = name.strip()
+    if not name:
+        repo.rollback()
+        raise ValueError("a Concept name is required")
+    if repo.get_goal(goal_id) is None:
+        repo.rollback()
+        return False
+    concept_id = normalizer.resolve(ConceptMention(name=name))
+    repo.add_edge("goal", goal_id, "concept", concept_id, "references")
+    repo.commit()
+    logger.info("attached concept %s to goal %s", concept_id, goal_id)
+    return True
+
+
+def detach_goal_concept(goal_id: int, *, concept_id: int, repo: Repository) -> bool:
+    """Detach a Concept from a Goal (issue #37). ``False`` if it wasn't attached.
+
+    Removing the last Concept leaves the Goal valid — an empty Concept set is
+    allowed (CONTEXT.md "Goal"; an unmet Goal is still a Goal).
+    """
+    removed = repo.remove_edge("goal", goal_id, "concept", concept_id, "references")
+    if removed:
+        repo.commit()
+        logger.info("detached concept %s from goal %s", concept_id, goal_id)
+    else:
+        repo.rollback()
+    return removed
+
+
 # -- Markers ----------------------------------------------------------------
 
 

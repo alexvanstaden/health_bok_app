@@ -591,6 +591,13 @@ class NewGoal(BaseModel):
     concepts: list[str] = []
 
 
+class GoalConcept(BaseModel):
+    """A Concept to attach to a Goal — picked from the catalogue or typed new (issue
+    #37). Either way the term is normalized like a Claim's."""
+
+    name: str
+
+
 class NewMarker(BaseModel):
     """A Marker reading to append: value + unit + reference range + date, against a
     Concept. Either reference bound may be omitted for a one-sided range."""
@@ -746,6 +753,38 @@ def delete_goal(goal_id: int) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail="goal not found")
     return {"id": goal_id, "deleted": True}
+
+
+@app.post("/api/goals/{goal_id}/concepts")
+def attach_goal_concept(goal_id: int, body: GoalConcept) -> dict:
+    """Attach a Concept to a Goal, normalized like a Claim's (issue #37).
+
+    The owner picks from the existing catalogue or types a new term; the
+    `ConceptNormalizer` reuses an existing Concept or mints one, so no near-duplicate
+    hub is created. Idempotent — re-adding an attached Concept is a no-op.
+    """
+    with _repo() as repo:
+        try:
+            attached = personal.attach_goal_concept(
+                goal_id, name=body.name, normalizer=_normalizer(repo), repo=repo
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not attached:
+        raise HTTPException(status_code=404, detail="goal not found")
+    return {"goal_id": goal_id, "attached": True}
+
+
+@app.delete("/api/goals/{goal_id}/concepts/{concept_id}")
+def detach_goal_concept(goal_id: int, concept_id: int) -> dict:
+    """Detach a Concept from a Goal (issue #37); an empty Concept set is allowed."""
+    with _repo() as repo:
+        removed = personal.detach_goal_concept(
+            goal_id, concept_id=concept_id, repo=repo
+        )
+    if not removed:
+        raise HTTPException(status_code=404, detail="concept not attached to goal")
+    return {"goal_id": goal_id, "detached": True}
 
 
 # -- Markers ----------------------------------------------------------------
