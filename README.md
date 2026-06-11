@@ -56,7 +56,9 @@ boundary. In it you:
   metadata-only Candidates, or remove it. Bulk-reject obvious noise; approving a backfill
   Candidate runs the *same* pipeline as a daily one (transcribing-if-needed first).
 - **Record the personal layer.** **Goals** (intentions or risks and the Concepts they
-  concern; unmet ones flagged), **Markers** (append-only dated readings per Concept, with
+  concern — editable on the Goal's page after creation, by picking from the catalogue or
+  typing a new term normalized onto one canonical Concept set; unmet ones flagged),
+  **Markers** (append-only dated readings per Concept, with
   out-of-range *derived* from the stored reference range and a viewable history series), and
   **Decisions** (time-bound adoptions carrying your *own* actual parameters, so deviation
   from a Protocol is first-class). The Web App suggests the Protocols, Claims, and Goals

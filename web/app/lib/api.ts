@@ -394,6 +394,17 @@ export function deleteGoal(id: number) {
   return json(`/api/goals/${id}`, { method: "DELETE" });
 }
 
+// A Goal's Concepts are editable after creation (issue #37): attach by picking from
+// the catalogue or typing a new term (normalized server-side, reused or minted), and
+// detach an attached one. Each persists as a `references` edge.
+export function attachGoalConcept(id: number, name: string) {
+  return post(`/api/goals/${id}/concepts`, { name });
+}
+
+export function detachGoalConcept(id: number, conceptId: number) {
+  return json(`/api/goals/${id}/concepts/${conceptId}`, { method: "DELETE" });
+}
+
 export function listMarkers(): Promise<{ markers: MarkerSeries[] }> {
   return json("/api/markers");
 }

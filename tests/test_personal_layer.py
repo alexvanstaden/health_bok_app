@@ -108,6 +108,80 @@ def test_delete_goal_removes_it_and_its_edges(conn):
     assert personal.delete_goal(goal_id, repo=repo) is False  # clean no-op
 
 
+def test_edit_goal_concepts_attach_detach_and_normalize(conn, postgres_url):
+    """A Goal's Concepts are editable after creation (issue #37)."""
+    repo = Repository(conn)
+    _admit_bok(repo)
+    norm = normalizer(repo)
+
+    # Start from a Goal with one Concept; the rest are attached on the detail page.
+    goal_id = personal.record_goal(
+        title="Lower cardiovascular risk", detail=None, concepts=["rapamycin"],
+        normalizer=norm, repo=repo,
+    )
+
+    # Attach a Concept the BoK already knows by picking it from the catalogue: the
+    # mention normalizes onto that *same* canonical hub, not a near-duplicate.
+    existing = _concepts_by_name(repo)
+    assert "mitochondrial density" in existing  # minted by the admitted Candidate
+    assert personal.attach_goal_concept(
+        goal_id, name="mitochondrial density", normalizer=norm, repo=repo
+    ) is True
+    attached = {c.name: c.id for c in repo.get_goal(goal_id).concepts}
+    assert attached == {
+        "rapamycin": existing["rapamycin"].id,
+        "mitochondrial density": existing["mitochondrial density"].id,  # reused
+    }
+
+    # Attach is idempotent — re-adding an attached Concept doesn't duplicate the edge.
+    assert personal.attach_goal_concept(
+        goal_id, name="mitochondrial density", normalizer=norm, repo=repo
+    ) is True
+    assert len(repo.get_goal(goal_id).concepts) == 2
+
+    # Typing a term that isn't in the catalogue mints a genuinely new Concept hub.
+    before = len(repo.list_concepts())
+    assert personal.attach_goal_concept(
+        goal_id, name="VO2 max", normalizer=norm, repo=repo
+    ) is True
+    assert len(repo.list_concepts()) == before + 1
+    assert "VO2 max" in {c.name for c in repo.get_goal(goal_id).concepts}
+
+    # The edits survive a reload (they are persisted `references` edges) — proven
+    # over a *fresh* connection, not just a re-read of the writer's own.
+    with psycopg.connect(postgres_url) as other:
+        assert {c.name for c in Repository(other).get_goal(goal_id).concepts} == {
+            "rapamycin", "mitochondrial density", "VO2 max",
+        }
+
+    # Detach each Concept; removing the last one leaves the Goal valid (empty set ok).
+    for c in list(repo.get_goal(goal_id).concepts):
+        assert personal.detach_goal_concept(
+            goal_id, concept_id=c.id, repo=repo
+        ) is True
+    assert repo.get_goal(goal_id).concepts == []
+    assert _edges_touching(conn, "goal", goal_id) == 0
+    # Detaching an absent Concept is a clean no-op; the Concept hubs are untouched.
+    assert personal.detach_goal_concept(
+        goal_id, concept_id=existing["rapamycin"].id, repo=repo
+    ) is False
+    assert "rapamycin" in _concepts_by_name(repo)
+
+
+def test_attach_goal_concept_rejects_empty_and_missing_goal(conn):
+    """Empty terms and gone Goals are rejected rather than minting junk (issue #37)."""
+    repo = Repository(conn)
+    norm = normalizer(repo)
+    goal_id = personal.record_goal(
+        title="Improve sleep", detail=None, concepts=[], normalizer=norm, repo=repo,
+    )
+    with pytest.raises(ValueError):
+        personal.attach_goal_concept(goal_id, name="   ", normalizer=norm, repo=repo)
+    assert personal.attach_goal_concept(
+        99999, name="melatonin", normalizer=norm, repo=repo
+    ) is False
+
+
 # -- Markers ----------------------------------------------------------------
 
 
