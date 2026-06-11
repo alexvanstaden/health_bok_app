@@ -170,6 +170,15 @@ def stance_model() -> str:
     return os.environ.get("STANCE_MODEL", DEFAULT_CLAUDE_MODEL)
 
 
+def concept_proposal_model() -> str:
+    """The Claude model the ConceptProposer uses to propose new Concepts (issue #39).
+
+    Defaults to the same Claude model as the rest of the pipeline; tunable via
+    CONCEPT_PROPOSAL_MODEL if proposing Concept terms warrants a different one.
+    """
+    return os.environ.get("CONCEPT_PROPOSAL_MODEL", DEFAULT_CLAUDE_MODEL)
+
+
 def impact_candidate_limit() -> int:
     """Per-category cap on candidates one Impact detection pass judges (issue #18).
 

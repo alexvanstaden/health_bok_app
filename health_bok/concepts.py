@@ -75,6 +75,37 @@ class ConceptNormalizer:
     def resolve(self, mention: ConceptMention) -> int:
         """Return the Concept id for `mention`, merging onto or minting a Concept."""
         embedding = self._embedder.embed(mention.name)
+        matched = self._match(mention, embedding)
+        if matched is not None:
+            return matched.concept_id
+
+        concept_id = self._repo.add_concept(mention.name, kind=mention.kind)
+        self._repo.add_embedding("concept", concept_id, embedding, model=self._model)
+        logger.debug("new concept %r -> %s", mention.name, concept_id)
+        return concept_id
+
+    def match(self, mention: ConceptMention) -> NearestConcept | None:
+        """The existing Concept `mention` resolves onto, or ``None`` if it would mint.
+
+        The read-only half of `resolve`: it runs the *same* conservative
+        merge/adjudicate decision but never writes, so a caller can ask "does this
+        proposed term already exist in the catalogue?" without minting it. The
+        new-Concept suggester (issue #39) uses it to drop a proposed term that
+        resolves to an existing Concept — so the system never offers a near-duplicate
+        of a hub it already has — while a genuinely new term (``None`` here) is the
+        one surfaced as an "add new Concept?" suggestion. Because it shares the exact
+        decision with `resolve`, what it predicts as "new" is precisely what
+        confirming the suggestion (an attach through `resolve`) will then mint.
+        """
+        embedding = self._embedder.embed(mention.name)
+        return self._match(mention, embedding)
+
+    def _match(
+        self, mention: ConceptMention, embedding: list[float]
+    ) -> NearestConcept | None:
+        """The merge/adjudicate decision over a pre-computed embedding (shared by
+        `resolve` and `match`): the nearest Concept if it is clearly or — on
+        adjudication — confidently the same, else ``None`` to mint a new one."""
         nearest = self._repo.nearest_concept(embedding, model=self._model)
 
         if nearest is not None and nearest.distance <= self._merge_distance:
@@ -82,7 +113,7 @@ class ConceptNormalizer:
                 "merge %r -> concept %s (d=%.4f)",
                 mention.name, nearest.concept_id, nearest.distance,
             )
-            return nearest.concept_id
+            return nearest
 
         if (
             nearest is not None
@@ -94,9 +125,6 @@ class ConceptNormalizer:
                 "adjudicated merge %r -> concept %s (d=%.4f)",
                 mention.name, nearest.concept_id, nearest.distance,
             )
-            return nearest.concept_id
+            return nearest
 
-        concept_id = self._repo.add_concept(mention.name, kind=mention.kind)
-        self._repo.add_embedding("concept", concept_id, embedding, model=self._model)
-        logger.debug("new concept %r -> %s", mention.name, concept_id)
-        return concept_id
+        return None

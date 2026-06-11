@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from . import backfill, config, creators, curation, impacts, personal, query, review
 from .adapters.answerer import ClaudeQueryAnswerer
+from .adapters.concept_proposer import ClaudeConceptProposer
 from .adapters.embedder import OpenAIEmbedder
 from .adapters.stance import ClaudeStanceJudge
 from .adapters.youtube import YouTubeContentSource
@@ -814,6 +815,35 @@ def goal_concept_suggestions(goal_id: int) -> dict:
             model=model,
         )
     return {"suggestions": [_concept_suggestion_dict(s) for s in suggestions]}
+
+
+@app.get("/api/goals/{goal_id}/new-concept-suggestions")
+def goal_new_concept_suggestions(goal_id: int) -> dict:
+    """New (not-yet-existing) Concepts to mint for a Goal, inferred from its title +
+    detail (issue #39).
+
+    The companion to `/concept-suggestions`: an LLM proposes candidate Concept terms
+    the Goal concerns, and each is checked against the existing catalogue with the
+    same conservative `ConceptNormalizer` logic — a term that resolves to an existing
+    Concept is dropped (no near-duplicate hub), and only a genuinely new term is
+    returned. Read-only: nothing is minted here. Confirming one is an attach through
+    `/concepts` (#37), which mints the Concept and attaches it in one step, so minting
+    stays owner-confirmed (ADR-0004). A model failure degrades to an empty list — the
+    existing-Concept suggestions (a separate call) keep working.
+    """
+    model = config.embedding_model()
+    with _repo() as repo:
+        if repo.get_goal(goal_id) is None:
+            raise HTTPException(status_code=404, detail="goal not found")
+        terms = personal.suggest_new_goal_concepts(
+            goal_id,
+            proposer=ClaudeConceptProposer(
+                config.anthropic_api_key(), config.concept_proposal_model()
+            ),
+            normalizer=_normalizer(repo),
+            repo=repo,
+        )
+    return {"suggestions": [{"name": t} for t in terms]}
 
 
 # -- Markers ----------------------------------------------------------------

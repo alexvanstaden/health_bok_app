@@ -172,6 +172,19 @@ input:focus, select:focus, textarea:focus {
 .link-pill:hover { border-color: var(--accent); }
 .crumb { color: var(--muted); }
 
+/* A *new*-Concept suggestion (issue #39): confirming it mints a Concept, so it is
+   set apart from an existing-Concept suggestion (a solid pill that only reuses) —
+   a dashed, green-tinted pill says "this grows the vocabulary", not "reuse". */
+button.link-pill.new-concept {
+  font: inherit;
+  cursor: pointer;
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--green);
+  color: var(--green);
+}
+button.link-pill.new-concept:hover { filter: brightness(1.15); }
+
 /* -- Personal layer: Goals, Markers, Decisions (issue #16) ---------------- */
 
 /* "Adopt a Protocol" — an anchor styled as a button (it navigates to the

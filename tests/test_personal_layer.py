@@ -24,10 +24,12 @@ import psycopg
 import pytest
 
 from health_bok import personal, review
+from health_bok.concepts import ConceptNormalizer
 from health_bok.repository import Repository
-from tests.fakes import FakeEmbedder, FakeExtractor
+from tests.fakes import FakeConceptProposer, FakeEmbedder, FakeExtractor
 from tests.seed import seed_processed_video
 from tests.test_admission import (
+    CONCEPT_VECTORS,
     EMBED_MODEL,
     RAPAMYCIN_CLAIM,
     drain_daily,
@@ -227,6 +229,93 @@ def test_suggest_existing_concepts_for_a_goal(conn):
     assert personal.suggest_goal_concepts(
         9999, embedder=embedder, repo=repo, model=EMBED_MODEL
     ) == []
+
+
+def test_suggest_new_concepts_to_mint_for_a_goal(conn):
+    """Suggest NEW (not-yet-existing) Concepts to mint for a Goal (issue #39).
+
+    The companion to the existing-Concept suggester: an LLM proposes candidate terms
+    from the Goal's title + detail, each is checked against the catalogue with the
+    *same* conservative `ConceptNormalizer` logic, and only a term resolving to *no*
+    existing Concept is surfaced as "new". A term that resolves to an existing Concept
+    — whether an exact name or a near-duplicate — is dropped, so no near-duplicate hub
+    is ever offered. Nothing is minted until the owner confirms; confirming mints and
+    attaches through the #37 path, after which the term drops out of the next pass.
+    Driven by a FakeConceptProposer over a real Postgres with controlled vectors.
+    """
+    repo = Repository(conn)
+    _admit_bok(repo)  # mints the BoK Concepts (incl. rapamycin, creatine monohydrate)
+
+    # One normalizer for both the match (in suggest) and the mint (in attach), so a
+    # term placed "far" is judged new *and* mints at that same vector — and then, once
+    # minted, is matched back onto itself. The new terms sit orthogonal to every
+    # existing Concept (so: new); "rapamycin therapy" sits on top of rapamycin (so it
+    # resolves to the existing hub and is dropped, never offered as new).
+    embedder = FakeEmbedder({
+        **CONCEPT_VECTORS,
+        "berberine": [0, 0, 0, 0, 0, 1],
+        "VO2 max training": [0, 0, 0, 0, 0, 0, 1],
+        "rapamycin therapy": [0, 0, 1, 0, 0],  # identical to rapamycin → merges
+    })
+    norm = ConceptNormalizer(embedder, repo, model=EMBED_MODEL)
+
+    goal_id = personal.record_goal(
+        title="Improve insulin sensitivity",
+        detail="Bring fasting glucose down without medication.",
+        concepts=[], normalizer=norm, repo=repo,
+    )
+    proposer = FakeConceptProposer([
+        "rapamycin",          # exact existing Concept → dropped
+        "rapamycin therapy",  # near-duplicate of rapamycin → resolves to it → dropped
+        "berberine",          # no match in the catalogue → new
+        "VO2 max training",   # no match → new
+        "Berberine",          # case-duplicate of berberine → de-duplicated
+    ])
+
+    before = len(repo.list_concepts())
+    new_terms = personal.suggest_new_goal_concepts(
+        goal_id, proposer=proposer, normalizer=norm, repo=repo
+    )
+    # Only the genuinely-new terms are offered, de-duplicated and order-preserving;
+    # the proposer saw the Goal's own title + detail.
+    assert new_terms == ["berberine", "VO2 max training"]
+    assert proposer.calls == [
+        ("Improve insulin sensitivity", "Bring fasting glucose down without medication.")
+    ]
+    # Suggesting mints nothing — the catalogue is untouched until the owner confirms.
+    assert len(repo.list_concepts()) == before
+
+    # Confirming a new-Concept suggestion mints the Concept and attaches it (the #37
+    # path), so the catalogue grows by exactly one and the Goal now concerns it.
+    assert personal.attach_goal_concept(
+        goal_id, name="berberine", normalizer=norm, repo=repo
+    ) is True
+    assert len(repo.list_concepts()) == before + 1
+    assert "berberine" in _concepts_by_name(repo)
+    assert "berberine" in [c.name for c in repo.get_goal(goal_id).concepts]
+
+    # A minted Concept is no longer "new": berberine now resolves to the hub just
+    # minted and drops out, leaving the other proposal.
+    after = personal.suggest_new_goal_concepts(
+        goal_id, proposer=proposer, normalizer=norm, repo=repo
+    )
+    assert after == ["VO2 max training"]
+
+    # An LLM failure degrades gracefully — no new suggestions, no error, and nothing
+    # minted; the existing-Concept path (a separate call) is unaffected.
+    failing = FakeConceptProposer(error=RuntimeError("model unavailable"))
+    count = len(repo.list_concepts())
+    assert personal.suggest_new_goal_concepts(
+        goal_id, proposer=failing, normalizer=norm, repo=repo
+    ) == []
+    assert len(repo.list_concepts()) == count
+
+    # A missing Goal is a clean empty list, and never reaches the LLM.
+    spy = FakeConceptProposer(["berberine"])
+    assert personal.suggest_new_goal_concepts(
+        9999, proposer=spy, normalizer=norm, repo=repo
+    ) == []
+    assert spy.calls == []
 
 
 def test_attach_goal_concept_rejects_empty_and_missing_goal(conn):
