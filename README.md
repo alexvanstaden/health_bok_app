@@ -222,6 +222,46 @@ health-bok worker                        # drain the admission queue
 > `npm audit` advisories are Next.js DoS classes fixed only by a major upgrade and a
 > transitive PostCSS issue — none apply to a single-user app reached only over Tailscale.
 
+## Logging & observability
+
+The Python services use the standard library `logging` module — no log files, no external
+aggregator (this is a single-user app). Each module owns a named logger under the
+`health_bok.*` namespace (`health_bok.worker`, `health_bok.review`, `health_bok.admit`,
+`health_bok.impacts`, …), so you can tell at a glance which stage emitted a line. The level
+is **INFO**, configured once in the CLI entrypoint (`health_bok/main.py`), and every line is
+written to **stdout/stderr** in the format `LEVEL name message`.
+
+Because logs go to the standard streams, under docker-compose they are captured per service.
+Follow a service's logs with:
+
+```bash
+docker compose logs -f worker     # the admission queue: drains, failures, dropped claims
+docker compose logs -f api        # the HTTP API serving the Web App
+docker compose logs -f pipeline   # the daily run: discovery, summaries, the Digest
+```
+
+The lines that matter operationally:
+
+- **`health_bok.review`** — `approved <video>; admission job enqueued`. Approving a Candidate
+  only *enqueues* a job and returns; the slow work happens elsewhere (next bullet).
+- **`health_bok.worker`** — `worker started …`, `worker drained N job(s)`, and on failure
+  `admission failed for <video>: <error>`. This is the process that actually turns an
+  approved Candidate into Claims/Protocols. **If the worker isn't running, approvals queue
+  up but the Body of Knowledge never changes.**
+- **`health_bok.admit`** — admission outcomes and any `dropping ungroundable claim/protocol`.
+- **`health_bok.impacts`** — `impact detection … raised N impact(s)`.
+
+Failures are also **persisted**, not just logged: a failed admission records the error on the
+`jobs` row (`last_error`) and drives the Candidate to a `failed` state with the same message
+(`admissions.error`), both surfaced in the Web App's review queue. So when a Candidate doesn't
+admit, there are two places to look — the Web App's failed state, and `docker compose logs
+worker` for the full traceback. A `failed` Candidate is retryable from the Web App.
+
+> Every long-running service restarts on failure (`restart: unless-stopped`), and schema
+> bootstrap takes a Postgres advisory lock so simultaneous boots can't collide. Still, if
+> approvals never take effect, the first thing to check is that the `worker` is actually up:
+> `docker compose ps` (a missing or `Exited` `worker` means nothing is draining the queue).
+
 ## Manage Creators
 
 Maintain the watch list of Creators the system follows. The **Web App** is the primary way
