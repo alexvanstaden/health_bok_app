@@ -16,10 +16,10 @@ The contract:
 
 The model returns strict JSON; the `impacts` engine is the backstop — it discards
 any out-of-vocabulary stance — so a sloppy response can never mint an Impact the
-table's CHECK would reject. The SDK is imported lazily, so importing the package
-needs no anthropic install; the orchestrator only ever sees the `StanceJudge` port.
-Mirrors the `ClaudeQueryAnswerer` adapter shape; the model is configurable (default
-the same Claude model as the rest of the pipeline) via STANCE_MODEL.
+table's CHECK would reject. The provider call goes through an injected `ChatModel`,
+so the adapter is provider-neutral; the orchestrator only ever sees the
+`StanceJudge` port. Mirrors the `ChatQueryAnswerer` adapter shape; the model is
+configurable (default the configured provider's) via STANCE_MODEL.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import json
 
 from ..impacts import STANCES, UNRELATED
 from ..models import ImpactAnchor, ImpactKnowledge
+from ..ports import ChatModel
 
 _MAX_TOKENS = 256
 
@@ -60,25 +61,18 @@ _SYSTEM = (
 )
 
 
-class ClaudeStanceJudge:
-    """Judges the Stance of one knowledge↔anchor pair via the Claude API."""
+class ChatStanceJudge:
+    """Judges the Stance of one knowledge↔anchor pair via an injected `ChatModel`."""
 
-    def __init__(self, api_key: str, model: str):
-        import anthropic
-
-        self._client = anthropic.Anthropic(api_key=api_key)
-        self._model = model
+    def __init__(self, chat: ChatModel):
+        self._chat = chat
 
     def judge(self, knowledge: ImpactKnowledge, anchor: ImpactAnchor) -> str:
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=_MAX_TOKENS,
+        raw = self._chat.complete(
             system=_SYSTEM,
-            messages=[
-                {"role": "user", "content": render_pair(knowledge, anchor)},
-            ],
+            user=render_pair(knowledge, anchor),
+            max_tokens=_MAX_TOKENS,
         )
-        raw = "".join(b.text for b in message.content if b.type == "text").strip()
         return parse_stance(raw)
 
 

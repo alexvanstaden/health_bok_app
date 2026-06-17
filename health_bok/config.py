@@ -1,6 +1,6 @@
 """Environment-variable configuration.
 
-API keys (Claude, Resend, OpenAI) are read from the environment and never
+API keys (OpenAI, Claude, Resend) are read from the environment and never
 hard-coded (PRD #1 acceptance criterion; user story 30). Construction is lazy:
 importing this module touches no environment, so tests can import the package
 without any secrets present.
@@ -12,8 +12,18 @@ import os
 from dataclasses import dataclass
 from datetime import timedelta
 
-# Default summarization model: cost-effective bulk summarization, overridable to
-# a higher-quality model via CLAUDE_MODEL (PRD #1, user story 17).
+# Which LLM provider backs the chat tasks — summarize, extract, answer, judge,
+# propose Concepts (ADR-0012). Defaults to OpenAI so the whole system runs on one
+# external LLM provider (embeddings and Whisper already use OPENAI_API_KEY);
+# `LLM_PROVIDER=anthropic` swaps in Claude instead. Selection lives in
+# `health_bok.llm`.
+DEFAULT_LLM_PROVIDER = "openai"
+
+# The per-provider default chat model, used by every task that doesn't pin its own
+# (SUMMARY_MODEL / EXTRACTION_MODEL / QUERY_MODEL / STANCE_MODEL /
+# CONCEPT_PROPOSAL_MODEL). The OpenAI default is the strongest general model; tune
+# down per-task for cost if wanted.
+DEFAULT_OPENAI_MODEL = "gpt-4.1"
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 
 # Transcripts whose text exceeds this many characters are summarized via
@@ -28,10 +38,9 @@ DEFAULT_SUMMARY_CHUNK_CHARS = 16_000
 # flooded with a creator's ancient catalogue. Tunable via BACKFILL_CUTOFF_DAYS.
 DEFAULT_BACKFILL_CUTOFF_DAYS = 730
 
-# Part 2 (issue #13). Extraction defaults to the same Claude model as
-# summarization but is tunable separately (precision-first extraction may warrant
-# a stronger model than bulk summaries). Embedding model is pinned by ADR-0008.
-DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-6"
+# Part 2 (issue #13). The chat tasks default to the provider's default chat model
+# (see `default_chat_model`) and are each tunable separately. The embedding model
+# is pinned by ADR-0008 and stays on OpenAI.
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
@@ -99,19 +108,37 @@ def _bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def llm_provider() -> str:
+    """Which provider backs the chat tasks — `openai` (default) or `anthropic`.
+
+    Normalized to lower-case; the value is validated where it is acted on
+    (`health_bok.llm.chat_model`), which raises ConfigError on anything else.
+    """
+    return os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+
+
+def default_chat_model() -> str:
+    """The default chat model for the configured provider (ADR-0012)."""
+    return DEFAULT_CLAUDE_MODEL if llm_provider() == "anthropic" else DEFAULT_OPENAI_MODEL
+
+
 def anthropic_api_key() -> str:
-    """The Claude API key — needed by the worker for extraction (ADR-0010)."""
+    """The Claude API key — required only when `LLM_PROVIDER=anthropic` (ADR-0012)."""
     return _require("ANTHROPIC_API_KEY")
 
 
 def openai_api_key() -> str:
-    """The OpenAI API key — needed by the worker for embeddings (ADR-0008)."""
+    """The OpenAI API key — embeddings, Whisper, and (by default) the chat tasks."""
     return _require("OPENAI_API_KEY")
 
 
 def extraction_model() -> str:
-    """The Claude model used for Claim/Protocol extraction (ADR-0010)."""
-    return os.environ.get("EXTRACTION_MODEL", DEFAULT_EXTRACTION_MODEL)
+    """The model used for Claim/Protocol extraction (ADR-0010, ADR-0012).
+
+    Defaults to the configured provider's default model; pin EXTRACTION_MODEL to
+    use a different one (e.g. a stronger model for precision-first extraction).
+    """
+    return os.environ.get("EXTRACTION_MODEL") or default_chat_model()
 
 
 def embedding_model() -> str:
@@ -126,13 +153,23 @@ def concept_merge_distance() -> float:
     return _float("CONCEPT_MERGE_DISTANCE", DEFAULT_MERGE_DISTANCE)
 
 
-def query_model() -> str:
-    """The Claude model used to synthesize grounded query answers (ADR-0011).
+def summary_model() -> str:
+    """The model used to summarize a Transcript for the Digest (ADR-0012).
 
-    Defaults to the same Claude model as the rest of the pipeline; tunable via
+    Defaults to the configured provider's default chat model; tunable via
+    SUMMARY_MODEL (e.g. a cheaper model for bulk summarization). Replaces the old
+    provider-named CLAUDE_MODEL knob.
+    """
+    return os.environ.get("SUMMARY_MODEL") or default_chat_model()
+
+
+def query_model() -> str:
+    """The model used to synthesize grounded query answers (ADR-0011, ADR-0012).
+
+    Defaults to the configured provider's default chat model; tunable via
     QUERY_MODEL if grounded Q&A warrants a different one from extraction.
     """
-    return os.environ.get("QUERY_MODEL", DEFAULT_CLAUDE_MODEL)
+    return os.environ.get("QUERY_MODEL") or default_chat_model()
 
 
 def query_concept_limit() -> int:
@@ -162,21 +199,21 @@ def query_evidence_limit() -> int:
 
 
 def stance_model() -> str:
-    """The Claude model the StanceJudge uses for change detection (issue #18).
+    """The model the StanceJudge uses for change detection (issue #18, ADR-0012).
 
-    Defaults to the same Claude model as the rest of the pipeline; tunable via
+    Defaults to the configured provider's default chat model; tunable via
     STANCE_MODEL if judging stances warrants a different one.
     """
-    return os.environ.get("STANCE_MODEL", DEFAULT_CLAUDE_MODEL)
+    return os.environ.get("STANCE_MODEL") or default_chat_model()
 
 
 def concept_proposal_model() -> str:
-    """The Claude model the ConceptProposer uses to propose new Concepts (issue #39).
+    """The model the ConceptProposer uses to propose new Concepts (issue #39, ADR-0012).
 
-    Defaults to the same Claude model as the rest of the pipeline; tunable via
+    Defaults to the configured provider's default chat model; tunable via
     CONCEPT_PROPOSAL_MODEL if proposing Concept terms warrants a different one.
     """
-    return os.environ.get("CONCEPT_PROPOSAL_MODEL", DEFAULT_CLAUDE_MODEL)
+    return os.environ.get("CONCEPT_PROPOSAL_MODEL") or default_chat_model()
 
 
 def impact_candidate_limit() -> int:
@@ -232,9 +269,8 @@ class Config:
     """
 
     database_url: str
-    anthropic_api_key: str
     openai_api_key: str
-    claude_model: str
+    summary_model: str
     summary_max_chars: int
     summary_chunk_chars: int
     # Part 2 (issue #13).
@@ -259,11 +295,13 @@ class Config:
         enabled = digest_enabled()
         return cls(
             database_url=_require("DATABASE_URL"),
-            anthropic_api_key=_require("ANTHROPIC_API_KEY"),
-            # Powers the Whisper transcription fallback for caption-less videos
-            # (PRD #1, user story 10) and Concept-embedding (ADR-0008).
+            # Powers the chat tasks by default (ADR-0012), the Whisper transcription
+            # fallback for caption-less videos (PRD #1, user story 10), and
+            # Concept-embedding (ADR-0008). The chat-provider key — this one for
+            # OpenAI, or ANTHROPIC_API_KEY when LLM_PROVIDER=anthropic — is required
+            # lazily by the `health_bok.llm` factory, not here.
             openai_api_key=_require("OPENAI_API_KEY"),
-            claude_model=os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
+            summary_model=summary_model(),
             # The map-reduce threshold and chunk size (issue #6) are tunable but
             # optional — sensible defaults keep a fresh deploy summarizing.
             summary_max_chars=_positive_int(

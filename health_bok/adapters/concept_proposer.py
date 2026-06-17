@@ -1,4 +1,4 @@
-"""Claude adapter for the ConceptProposer port (issue #39).
+"""ConceptProposer adapter over the ChatModel seam (issue #39, ADR-0012).
 
 Proposes the Concept *terms* a Goal concerns from its title + detail — the LLM half
 of the "when should a new Concept be added?" assist. It only proposes short
@@ -16,16 +16,18 @@ The contract:
 
 The model returns strict JSON; a sloppy or unparseable response degrades to an
 empty list, so a bad answer simply yields no new-Concept suggestions rather than
-failing the Goal page. The SDK is imported lazily, so importing the package needs
-no anthropic install; the orchestrator only ever sees the `ConceptProposer` port.
-Mirrors the `ClaudeExtractor`/`ClaudeStanceJudge` adapter shape; the model is
-configurable (default the same Claude model as the rest of the pipeline) via
+failing the Goal page. The provider call goes through an injected `ChatModel`, so
+the adapter is provider-neutral; the orchestrator only ever sees the
+`ConceptProposer` port. Mirrors the `ChatExtractor`/`ChatStanceJudge` adapter
+shape; the model is configurable (default the configured provider's) via
 CONCEPT_PROPOSAL_MODEL.
 """
 
 from __future__ import annotations
 
 import json
+
+from ..ports import ChatModel
 
 _MAX_TOKENS = 256
 
@@ -47,23 +49,18 @@ _SYSTEM = (
 )
 
 
-class ClaudeConceptProposer:
-    """Proposes candidate Concept terms for a Goal via the Claude API."""
+class ChatConceptProposer:
+    """Proposes candidate Concept terms for a Goal via an injected `ChatModel`."""
 
-    def __init__(self, api_key: str, model: str):
-        import anthropic
-
-        self._client = anthropic.Anthropic(api_key=api_key)
-        self._model = model
+    def __init__(self, chat: ChatModel):
+        self._chat = chat
 
     def propose(self, title: str, detail: str | None) -> list[str]:
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=_MAX_TOKENS,
+        raw = self._chat.complete(
             system=_SYSTEM,
-            messages=[{"role": "user", "content": render_goal(title, detail)}],
+            user=render_goal(title, detail),
+            max_tokens=_MAX_TOKENS,
         )
-        raw = "".join(b.text for b in message.content if b.type == "text").strip()
         return parse_concepts(raw)
 
 
