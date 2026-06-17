@@ -20,7 +20,7 @@ spine:
 1. fetches the video's **Transcript** — free YouTube captions when present, falling back to
    the OpenAI **Whisper** API (audio download → transcription) when a video has none;
 2. archives that Transcript **immutably** in Postgres with full provenance;
-3. generates a prose **Summary** via the Claude API, map-reducing transcripts longer than a
+3. generates a prose **Summary** via the configured LLM provider (ADR-0012), map-reducing transcripts longer than a
    configurable threshold (chunk → summarize → reduce) so a multi-hour podcast never breaks
    the run; and
 4. bundles the run's new Summaries into **one Digest** email — sent only when there is new
@@ -105,13 +105,14 @@ while Postgres stays real:
 | --------------- | ------------------------------------- | ------------------- |
 | `ContentSource` | `youtube.py`                          | YouTube — resolves an @handle/URL to a `channel_id`, lists the back-catalogue for backfill Candidates, lazily fetches one Candidate's full description + accurate publish date on demand, discovers new uploads via RSS, fetches captions, downloads audio for the Whisper fallback |
 | `Transcriber`   | `whisper.py`                          | OpenAI Whisper — transcribes a caption-less video's audio (daily path only) |
-| `Summarizer`    | `claude.py` (single pass), wrapped by `summarizer.py` (map-reduce for long Transcripts) | Claude API          |
+| `ChatModel`     | `openai_chat.py` (default), `anthropic_chat.py` | The one provider-neutral LLM-transport seam (ADR-0012); `LLM_PROVIDER` picks the provider in `llm.py`. Every adapter below depends only on this |
+| `Summarizer`    | `summarize.py` (single pass over `ChatModel`), wrapped by `summarizer.py` (map-reduce for long Transcripts) | Configured LLM provider |
 | `DigestSender`  | `resend.py`                           | Resend              |
-| `Extractor`     | `extractor.py`                        | Claude API — Transcript → Claims + Protocols + Concept mentions (precision-first) |
+| `Extractor`     | `extractor.py`                        | LLM (via `ChatModel`) — Transcript → Claims + Protocols + Concept mentions (precision-first) |
 | `Embedder`      | `embedder.py`                         | OpenAI `text-embedding-3-small` — 1536-d vectors for Concept normalization |
-| `QueryAnswerer` | `answerer.py`                         | Claude API — retrieved evidence → a grounded, cited answer or an abstention |
-| `StanceJudge`   | `stance.py`                           | Claude API — one knowledge↔anchor pair → a Stance for change detection |
-| `ConceptProposer` | `concept_proposer.py`               | Claude API — a Goal's title + detail → candidate new-Concept terms (owner-confirmed before minting) |
+| `QueryAnswerer` | `answerer.py`                         | LLM (via `ChatModel`) — retrieved evidence → a grounded, cited answer or an abstention |
+| `StanceJudge`   | `stance.py`                           | LLM (via `ChatModel`) — one knowledge↔anchor pair → a Stance for change detection |
+| `ConceptProposer` | `concept_proposer.py`               | LLM (via `ChatModel`) — a Goal's title + detail → candidate new-Concept terms (owner-confirmed before minting) |
 
 ```
 health_bok/
@@ -159,8 +160,9 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | Variable                   | Purpose                                            |
 | -------------------------- | -------------------------------------------------- |
 | `DATABASE_URL`             | Postgres connection (the single source of truth)   |
-| `ANTHROPIC_API_KEY`        | Claude — the Summarizer                            |
-| `CLAUDE_MODEL`             | Summarization model (default `claude-sonnet-4-6`)  |
+| `LLM_PROVIDER`             | Provider for the chat tasks — `openai` (default) or `anthropic` (ADR-0012) |
+| `ANTHROPIC_API_KEY`        | Claude — required **only** when `LLM_PROVIDER=anthropic` |
+| `SUMMARY_MODEL`            | Summarization model (default: the provider's default chat model, OpenAI `gpt-4.1`) |
 | `SUMMARY_MAX_CHARS`        | Map-reduce above this Transcript length (default `48000`) |
 | `SUMMARY_CHUNK_CHARS`      | Section size when map-reducing (default `16000`)   |
 | `BACKFILL_CUTOFF_DAYS`     | Backfill window when a Creator is added (default `730`, ~2 years) |
@@ -168,16 +170,16 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `RESEND_API_KEY`           | Resend — the DigestSender (only when `DIGEST_ENABLED`) |
 | `DIGEST_FROM`              | Verified Resend "from" address (only when `DIGEST_ENABLED`) |
 | `DIGEST_RECIPIENT`         | Where the Digest is delivered (only when `DIGEST_ENABLED`) |
-| `OPENAI_API_KEY`           | OpenAI — Whisper transcription **and** Concept embeddings |
-| `EXTRACTION_MODEL`         | Claude model for extraction (default `claude-sonnet-4-6`) |
+| `OPENAI_API_KEY`           | OpenAI — Whisper transcription, Concept embeddings, **and** (by default) the chat tasks |
+| `EXTRACTION_MODEL`         | Model for extraction (default: the provider's default chat model) |
 | `EMBEDDING_MODEL`          | Embedding model for Concept normalization (default `text-embedding-3-small`) |
 | `CONCEPT_MERGE_DISTANCE`   | Cosine-distance merge threshold for Concepts (default `0.15`) |
 | `WEBAPP_BASE_URL`          | Web App base URL for Digest deep-links (optional)  |
-| `QUERY_MODEL`              | Claude model for grounded-query synthesis (default `claude-sonnet-4-6`) |
+| `QUERY_MODEL`              | Model for grounded-query synthesis (default: the provider's default chat model) |
 | `QUERY_MAX_DISTANCE`       | Cosine-distance abstention cutoff for query retrieval (default `0.6`) |
-| `STANCE_MODEL`             | Claude model for the Impact StanceJudge (default `claude-sonnet-4-6`) |
+| `STANCE_MODEL`             | Model for the Impact StanceJudge (default: the provider's default chat model) |
 | `IMPACT_CANDIDATE_LIMIT`   | Per-category cap on candidates a detection pass judges (default `25`) |
-| `CONCEPT_PROPOSAL_MODEL`   | Claude model for proposing new Concepts for a Goal (default `claude-sonnet-4-6`) |
+| `CONCEPT_PROPOSAL_MODEL`   | Model for proposing new Concepts for a Goal (default: the provider's default chat model) |
 
 ## Run the pipeline
 
@@ -208,9 +210,9 @@ and edit the Body of Knowledge, record the personal layer, **Ask** grounded ques
 the **Impacts** inbox, and review the **Logs** of every processed video (see
 [What it does](#what-it-does)).
 
-The worker and pipeline read the same `.env`; the worker needs the LLM keys
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) to extract and embed. The HTTP API can also be run
-outside Docker for development:
+The worker and pipeline read the same `.env`; the worker needs `OPENAI_API_KEY`
+to extract and embed (and `ANTHROPIC_API_KEY` only if `LLM_PROVIDER=anthropic`).
+The HTTP API can also be run outside Docker for development:
 
 ```bash
 pip install -e ".[web,dev]"

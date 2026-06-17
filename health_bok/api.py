@@ -27,11 +27,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import backfill, config, creators, curation, impacts, personal, query, review
-from .adapters.answerer import ClaudeQueryAnswerer
-from .adapters.concept_proposer import ClaudeConceptProposer
+from . import backfill, config, creators, curation, impacts, llm, personal, query, review
+from .adapters.answerer import ChatQueryAnswerer
+from .adapters.concept_proposer import ChatConceptProposer
 from .adapters.embedder import OpenAIEmbedder
-from .adapters.stance import ClaudeStanceJudge
+from .adapters.stance import ChatStanceJudge
 from .adapters.youtube import YouTubeContentSource
 from .concepts import ConceptNormalizer
 from .db import connect, init_schema
@@ -109,7 +109,7 @@ def _normalizer(repo: Repository) -> ConceptNormalizer:
 def _detect_anchor_impacts(repo: Repository, anchor_type: str, anchor_id: int) -> None:
     """Run the reverse Impact pass for a just-recorded Decision/Goal (issue #18).
 
-    Best-effort and synchronous (like `/api/query`'s Claude call): the anchor is
+    Best-effort and synchronous (like `/api/query`'s LLM call): the anchor is
     already committed, so a StanceJudge failure is logged and swallowed rather than
     failing the write. Scans the existing Body of Knowledge for evidence bearing on
     the new anchor and raises Impacts where the judge sees genuine change.
@@ -118,7 +118,7 @@ def _detect_anchor_impacts(repo: Repository, anchor_type: str, anchor_id: int) -
         impacts.detect_for_new_anchor(
             anchor_type,
             anchor_id,
-            judge=ClaudeStanceJudge(config.anthropic_api_key(), config.stance_model()),
+            judge=ChatStanceJudge(llm.chat_model(config.stance_model())),
             repo=repo,
             candidate_limit=config.impact_candidate_limit(),
         )
@@ -837,9 +837,7 @@ def goal_new_concept_suggestions(goal_id: int) -> dict:
             raise HTTPException(status_code=404, detail="goal not found")
         terms = personal.suggest_new_goal_concepts(
             goal_id,
-            proposer=ClaudeConceptProposer(
-                config.anthropic_api_key(), config.concept_proposal_model()
-            ),
+            proposer=ChatConceptProposer(llm.chat_model(config.concept_proposal_model())),
             normalizer=_normalizer(repo),
             repo=repo,
         )
@@ -998,7 +996,7 @@ def detach_decision_link(
 # The primary way the owner *explores* the Body of Knowledge now that a visual
 # graph is out of v1 scope (ADR-0009, ADR-0011). A free-text question is embedded
 # (same Embedder as the admit pipeline), retrieval gathers the Claims/Protocols and
-# personal-layer context sharing a Concept with it, and the QueryAnswerer (Claude)
+# personal-layer context sharing a Concept with it, and the QueryAnswerer (the LLM)
 # synthesizes an answer grounded only in that evidence — citing the specific Claims,
 # each clickable through to its Source and locator, or abstaining honestly. The
 # grounding and cite-or-abstain guarantees live in the `query` service, not here.
@@ -1017,9 +1015,7 @@ def ask(body: Question) -> dict:
         answer = query.answer_question(
             body.question,
             embedder=OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
-            answerer=ClaudeQueryAnswerer(
-                config.anthropic_api_key(), config.query_model()
-            ),
+            answerer=ChatQueryAnswerer(llm.chat_model(config.query_model())),
             repo=repo,
             model=config.embedding_model(),
             concept_limit=config.query_concept_limit(),

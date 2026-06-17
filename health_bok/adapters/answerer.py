@@ -1,4 +1,4 @@
-"""Claude adapter for the QueryAnswerer port (ADR-0011).
+"""QueryAnswerer adapter over the ChatModel seam (ADR-0011, ADR-0012).
 
 Turns the owner's question plus the retrieved evidence into a grounded, cited
 answer, under the cite-or-abstain contract (ADR-0011):
@@ -13,10 +13,10 @@ The evidence is rendered with each Claim tagged by id so the model can cite it;
 the model returns strict JSON keyed to the `GroundedAnswer` shape. The query
 service is the backstop — it resolves cited ids against the retrieved evidence and
 enforces cite-or-abstain — so a sloppy response can never smuggle in an ungrounded
-citation. The SDK is imported lazily, so importing the package needs no anthropic
-install; the orchestrator only ever sees the `QueryAnswerer` port. Mirrors the
-`ClaudeExtractor`/`ClaudeSummarizer` adapter shape; the model is configurable
-(default the same Claude model as the rest of the pipeline) via QUERY_MODEL.
+citation. The provider call goes through an injected `ChatModel`, so the adapter is
+provider-neutral; the orchestrator only ever sees the `QueryAnswerer` port. Mirrors
+the `ChatExtractor`/`ChatSummarizer` adapter shape; the model is configurable
+(default the configured provider's) via QUERY_MODEL.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 
 from ..models import EvidenceMarker, GroundedAnswer, RetrievedEvidence
+from ..ports import ChatModel
 
 _MAX_TOKENS = 1024
 
@@ -50,31 +51,21 @@ _SYSTEM = (
 )
 
 
-class ClaudeQueryAnswerer:
-    """Answers a grounded, cited question over retrieved evidence via the Claude API."""
+class ChatQueryAnswerer:
+    """Answers a grounded, cited question over retrieved evidence via a `ChatModel`."""
 
-    def __init__(self, api_key: str, model: str):
-        import anthropic
-
-        self._client = anthropic.Anthropic(api_key=api_key)
-        self._model = model
+    def __init__(self, chat: ChatModel):
+        self._chat = chat
 
     def answer(self, question: str, evidence: RetrievedEvidence) -> GroundedAnswer:
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=_MAX_TOKENS,
+        raw = self._chat.complete(
             system=_SYSTEM,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"Question: {question}\n\n"
-                        f"Evidence from the owner's library:\n{render_evidence(evidence)}"
-                    ),
-                }
-            ],
+            user=(
+                f"Question: {question}\n\n"
+                f"Evidence from the owner's library:\n{render_evidence(evidence)}"
+            ),
+            max_tokens=_MAX_TOKENS,
         )
-        raw = "".join(b.text for b in message.content if b.type == "text").strip()
         return parse_answer(raw)
 
 

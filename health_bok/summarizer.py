@@ -7,7 +7,7 @@ while long ones are split into sections, each section summarized, and those
 section Summaries reduced into one final prose Summary.
 
 The orchestration depends only on the `Summarizer` port (CONTEXT.md), not on any
-LLM SDK — the inner summarizer is `ClaudeSummarizer` in production and a fake in
+LLM SDK — the inner summarizer is `ChatSummarizer` in production and a fake in
 tests, so the chunk/reduce logic is exercised without a network (PRD #1 testing
 decisions). Length is measured in characters of the Transcript text, a cheap
 deterministic proxy that needs no tokenizer.
