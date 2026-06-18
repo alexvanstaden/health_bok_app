@@ -3,6 +3,12 @@
 ADR-0003 chose Postgres for "the graph (nodes, an edges table, and pgvector embeddings)"
 but never said what "nodes" physically meant. This pins it.
 
+**Extended by ADR-0013** (Concept↔Concept links): a typed `concept_relations` table holds
+claim-grounded *lateral* relationships (the predicate set is too large/volatile for the `edges`
+`kind` CHECK, so it gets its own table — the same reasoning that keeps ownership out of `edges`);
+the *taxonomic* `broader-of` link is one new `edges` `kind`; and `creators` gains an owner-set
+trust-tier column.
+
 ## Decision
 
 - **Typed entity tables**, one per first-class entity (`claims`, `protocols`, `concepts`,

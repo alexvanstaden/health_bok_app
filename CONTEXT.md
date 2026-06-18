@@ -99,10 +99,34 @@ _Avoid_: status, biomarker, vitals, metric, reading
 **Concept**:
 A normalized, deduplicated hub node for something the domain talks about — a supplement,
 body system, symptom, mechanism, condition, or intervention. Claims, Protocols, Decisions,
-Goals, and Markers all *reference* Concepts; relatedness and contradiction are computed by
-traversing shared Concepts. Unlike Claims, Concepts MAY be merged/normalized — that is
-their purpose.
+Goals, and Markers all *reference* Concepts. Concepts also connect *to each other* two ways
+(ADR-0013): a claim-grounded **Relationship** (lateral) and a curated **broader-of** taxonomy
+(hierarchy). Unlike Claims, Concepts MAY be merged/normalized — that is their purpose.
 _Avoid_: tag, topic, keyword, entity
+
+**Relationship**:
+A directed, typed, claim-grounded link between two Concepts — "APOE4 `risk_factor_for`
+Alzheimer's" (ADR-0013). Its truth comes *only* from the owner's Claims (no Claim referencing
+both Concepts ⇒ no Relationship; lose the last evidencing Claim ⇒ it vanishes), so it is a
+*materialized projection* of Claims, never curated by hand. Predicates are signed
+(`protects_against ⟷ risk_factor_for`); contradiction is derived from opposite-pairs plus the
+rule that `no_effect_on` contradicts any signed predicate on the same pair. **Strength** =
+Σ over distinct creators of (owner trust-tier × recency-decay).
+_Avoid_: edge, association, link, correlation
+
+**broader-of**:
+The owner-curated *taxonomic* link that rolls narrower Concepts up under a broader one
+(Brain metabolism → Brain) — a DAG (multi-parent, acyclic), not claim-grounded, since no creator
+asserts it (ADR-0013). The system proposes parents (reusing the issue-#39 suggester); a proposal
+stays a suggestion, invisible to roll-up, until the owner confirms. Selecting a Concept shows its
+sub-Concepts *and* every Relationship in its whole subtree, attributed and ranked by Strength.
+_Avoid_: parent, category, tag, is-a
+
+**Trust-tier**:
+The owner's per-Creator confidence weight (ADR-0013) — the honest "source quality" signal for a
+personal system. Feeds Relationship Strength; absent any tiering, every Creator is tier 1 and
+Strength is plain distinct-creator count.
+_Avoid_: rating, score, rank
 
 ## Natural-language Query
 
@@ -132,11 +156,17 @@ A detected, stance-typed link between newly-arrived knowledge and an existing an
 a Claim supporting it, a Goal, or a Marker), **or** a newly-recorded anchor (a Decision or Goal)
 checked against the existing Body of Knowledge. Carries a **stance** and is a first-class, persisted
 object with a lifecycle (`new → reviewed → actioned | dismissed`), so it never re-nags and leaves an
-audit trail of what the owner saw and chose.
+audit trail of what the owner saw and chose. A new/changed Concept **Relationship** touching a
+tracked Concept — or anything in its broader-of subtree — also raises an Impact (ADR-0013): the
+**Tier-1** push. Other notable structural changes go to a **Tier-2** browsable feed (pull, gated by
+Strength), not the inbox. Widening tracked scope fires a single *summary* Impact for the
+pre-existing backlog, then stays quiet.
 _Avoid_: alert, flag, notification, match, hit
 
 **Stance**:
 The nature of an Impact: `reinforces | contradicts | refines | opportunity` (or `unrelated`,
-which is discarded). The judgement comes from an LLM pass over Concept-overlap candidates —
-not from Concept overlap alone.
+which is discarded), plus two relationship-native stances (ADR-0013): `new_link` (a sign-neutral
+connection appeared) and `eroded` (a Relationship a Decision relied on lost its last evidence).
+The evidence-vs-anchor stances come from an LLM pass over Concept-overlap candidates;
+relationship stances are derived *structurally* from the graph diff, no LLM pass.
 _Avoid_: relation, type, polarity
