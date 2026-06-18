@@ -209,6 +209,57 @@ def test_suggester_proposes_only_legal_broader_parents(conn):
     ) == []
 
 
+def test_suggester_does_not_re_offer_an_already_proposed_parent(conn):
+    """A proposal that already resolves to an existing edge is no duplicate (issue #50).
+
+    Dedup must fire on the edge's *existence*, not on its confirmation: a parent
+    the owner has only *proposed* (still a suggestion, not yet confirmed) must not
+    be offered a second time, or the suggester would nag with a parent already in
+    flight. `test_suggester_proposes_only_legal_broader_parents` covers the
+    confirmed case; this covers the proposed-but-unconfirmed one.
+    """
+    repo = Repository(conn)
+    bmet = _mint(repo, "Brain metabolism")
+    _mint(repo, "Brain")
+    repo.commit()
+
+    # Propose Brain as a parent but leave it unconfirmed — still just a suggestion.
+    curation.propose_broader_of(_cid(repo, "Brain"), bmet, repo=repo)
+    assert repo.list_broader_of(confirmed=False) != []  # the edge exists, unconfirmed
+
+    # The suggester must not offer the same (unconfirmed) parent again.
+    assert curation.suggest_broader_of(
+        bmet, proposer=FakeHierarchyProposer(["Brain"]), embedder=FakeEmbedder(VECTORS),
+        repo=repo, model=EMBED_MODEL,
+    ) == []
+
+
+def test_owner_can_reject_a_parent_and_pick_a_different_one(conn):
+    """Rejecting a proposal frees the Concept to roll up under a different parent (issue #50).
+
+    The owner is never locked into the system's first guess: a wrong proposed
+    parent is rejected (discarded), and a different parent can then be proposed and
+    confirmed in its place. Proves the "pick a different parent" acceptance
+    criterion over the repository.
+    """
+    repo = Repository(conn)
+    bmet = _mint(repo, "Brain metabolism")
+    brain = _mint(repo, "Brain")
+    lipids = _mint(repo, "lipid metabolism")
+    repo.commit()
+
+    # System proposes Brain; the owner judges it wrong and rejects it.
+    assert curation.propose_broader_of(brain, bmet, repo=repo) is True
+    assert curation.reject_broader_of(brain, bmet, repo=repo) is True
+    assert repo.broader_parents(bmet) == []
+
+    # The owner picks a different parent instead, and confirms it.
+    assert curation.propose_broader_of(lipids, bmet, repo=repo) is True
+    assert curation.confirm_broader_of(lipids, bmet, repo=repo) is True
+    parents = repo.broader_parents(bmet, confirmed_only=True)
+    assert [p.name for p in parents] == ["lipid metabolism"]
+
+
 def test_suggester_degrades_to_empty_on_llm_failure(conn):
     repo = Repository(conn)
     bmet = _mint(repo, "Brain metabolism")
