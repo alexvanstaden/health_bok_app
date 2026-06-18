@@ -616,7 +616,10 @@ def concept_neighbourhood(concept_id: int) -> dict:
 
     Every lateral relationship in the Concept's confirmed `broader-of` subtree,
     attributed to the descendant it lives on, deduped across DAG diamonds, ranked by
-    evidence Strength, and flagged when the pair is contested.
+    evidence Strength, and flagged when the pair is contested. Each relationship
+    carries its evidencing Claims as Citations (Source + locator deep-link) — the
+    same shape NL Query cites (ADR-0011) — so the owner can click straight through to
+    the moment each connection was asserted (issue #51).
     """
     with _repo() as repo:
         hood = repo.concept_neighbourhood(concept_id)
@@ -703,6 +706,18 @@ def _neighbour_relation_dict(r) -> dict:
             if r.via_concept_id is not None else None
         ),
         "evidence_claim_ids": r.evidence_claim_ids,
+        # The evidencing Claims, clickable through to Source + locator — the same
+        # Citation shape NL Query returns (ADR-0011), so both surfaces agree.
+        "evidence": [
+            {
+                "claim_id": c.claim_id,
+                "text": c.text,
+                "type": c.type,
+                "deep_link": c.deep_link,
+                "source_title": c.source_title,
+            }
+            for c in r.evidence
+        ],
     }
 
 

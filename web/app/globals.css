@@ -235,3 +235,19 @@ button.unlink:hover { color: var(--red); }
 .cite .meta { color: var(--muted); font-size: 0.85rem; margin-top: 0.2rem; }
 .card ol { margin: 0.4rem 0 0; padding-left: 1.2rem; }
 .card ol li { margin: 0.5rem 0; }
+
+/* -- Concept neighbourhood view (issue #51, ADR-0013) --------------------- */
+
+/* One lateral relationship: the directed src → predicate → dst link, its
+   Strength/attribution badges, and the evidencing Claims beneath it. */
+.relation .link { display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
+.relation .predicate {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.relation .arrow { color: var(--muted); }
+/* A contested pair: an opposite or no-effect predicate also holds (ADR-0013). */
+.badge.contested { color: var(--red); border-color: var(--red); }
+.relation .evidence { margin: 0.6rem 0 0; padding-left: 1.1rem; }
+.relation .evidence li { margin: 0.4rem 0; }

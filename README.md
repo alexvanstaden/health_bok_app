@@ -62,10 +62,15 @@ boundary. In it you:
   debunking, on the same pair is flagged contested rather than merged). A **broader-of
   taxonomy** is the one link you curate: the system *proposes* broader parents (an LLM over the
   embedding cluster) and you confirm — a proposal stays invisible to roll-up until you do, and a
-  cycle guard keeps it a DAG. Selecting a Concept shows its **neighbourhood**: its sub-Concepts
+  cycle guard keeps it a DAG. Selecting a Concept opens its **neighbourhood view**
+  (`/concepts/{id}/neighbourhood`, linked from the Concept page): its sub-Concepts
   plus every relationship in its whole subtree, attributed to where it lives, deduped, and
   **ranked by Strength** (distinct creators × your per-Creator trust-tier × recency-decay, so
-  one prolific channel can't manufacture false consensus).
+  one prolific channel can't manufacture false consensus). Each relationship is shown as a
+  directed, signed-predicate link, flagged when contested, and **clickable through to the
+  Claims that evidence it** — each carrying its Source and locator deep-link, the same
+  Citations the Ask view shows, so the map and your prose answers tell one consistent story.
+  Ask stays the primary way to *explore* (ADR-0009/0011); this is the visual map.
 - **Manage Creators & backfill.** Add a Creator by @handle or channel URL (resolved once to
   a stable channel_id), see its resolved name, pull in its recent back-catalogue as
   metadata-only Candidates, or remove it. Bulk-reject obvious noise; approving a backfill
