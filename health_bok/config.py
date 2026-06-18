@@ -216,6 +216,15 @@ def concept_proposal_model() -> str:
     return os.environ.get("CONCEPT_PROPOSAL_MODEL") or default_chat_model()
 
 
+def hierarchy_proposal_model() -> str:
+    """The model the HierarchyProposer uses to propose broader-of parents (ADR-0013).
+
+    Defaults to the configured provider's default chat model; tunable via
+    HIERARCHY_PROPOSAL_MODEL if proposing taxonomy parents warrants a different one.
+    """
+    return os.environ.get("HIERARCHY_PROPOSAL_MODEL") or default_chat_model()
+
+
 def impact_candidate_limit() -> int:
     """Per-category cap on candidates one Impact detection pass judges (issue #18).
 

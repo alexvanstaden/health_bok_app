@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from .acquire import acquire_transcript
 from .admit import admit_candidate
 from .concepts import ConceptNormalizer
-from .impacts import detect_for_admitted_video
+from .impacts import detect_for_admitted_video, detect_relationship_impacts_for_video
 from .ports import ContentSource, Extractor, StanceJudge, Transcriber
 from .repository import Repository
 
@@ -96,12 +96,24 @@ def process_next_job(
 def _detect_impacts(
     video_id: str, *, judge: StanceJudge | None, repo: Repository
 ) -> None:
-    """Run the forward Impact pass over a just-admitted video, failure-isolated.
+    """Run the post-admission Impact passes over a just-admitted video, failure-isolated.
 
-    Detection runs *after* admission has committed, so a `StanceJudge` failure costs
-    only the change-detection step — the Claims are durably admitted and the job is
-    already `done` (ADR-0005). Skipped when no judge is configured.
+    Two passes, each *after* admission has committed so a failure costs only change
+    detection — the Claims are durably admitted and the job is already `done`
+    (ADR-0005):
+
+      * the **relationship** pass (ADR-0013) — structural, no LLM — always runs,
+        alerting on the lateral relationships the video derived (Tier-1 push to
+        tracked Goals/Decisions, Tier-2 feed otherwise);
+      * the **knowledge↔anchor** forward pass (issue #18) runs only when a
+        `StanceJudge` is wired; the daily-pipeline tests that don't exercise it
+        leave `judge` unset and it is skipped.
     """
+    try:
+        detect_relationship_impacts_for_video(video_id, repo=repo)
+    except Exception as exc:
+        repo.rollback()
+        logger.warning("relationship alerting failed for %s: %s", video_id, exc)
     if judge is None:
         return
     try:

@@ -58,6 +58,19 @@ DEFAULT_CANDIDATE_LIMIT = 25
 # it, so it lands as a contradiction rather than a gentle refinement.
 SUPERSEDE_STANCE = "contradicts"
 
+# Relationship-alerting stances, derived *structurally* from the graph diff — no LLM
+# (ADR-0013): a brand-new connection reads as `new_link`; a pair that now holds
+# contradicting predicates as `contradicts`; a relationship whose last evidence
+# vanished as `eroded`.
+NEW_LINK = "new_link"
+CONTRADICTS = "contradicts"
+ERODED = "eroded"
+
+# Tier-2 notability gate: a structural change that touches no tracked anchor only
+# reaches the browsable feed when its Strength clears this threshold, so the feed
+# surfaces the well-supported, not every stray edge. A tuning knob (ADR-0013).
+DEFAULT_TIER2_STRENGTH_THRESHOLD = 2.0
+
 
 # -- detection (forward, reverse, supersede) --------------------------------
 
@@ -152,6 +165,136 @@ def supersede_impacts(superseded_claim_id: int, *, repo: Repository) -> list[int
     return raised
 
 
+# -- relationship alerting (ADR-0013) ---------------------------------------
+
+
+def detect_relationship_impacts_for_video(
+    video_id: str,
+    *,
+    repo: Repository,
+    now=None,
+    strength_threshold: float = DEFAULT_TIER2_STRENGTH_THRESHOLD,
+) -> list[int]:
+    """Alert on the lateral relationships a freshly-admitted video derived (ADR-0013).
+
+    The relationship-aware forward pass, run by the worker after admission. Each
+    relationship the video evidences raises:
+
+      * **Tier-1** — a push Impact on every Goal/Decision tracking a Concept in the
+        relationship's subtree (ancestor-or-self of either endpoint), so a
+        development in an area the owner cares about reaches the inbox; or
+      * **Tier-2** — when it touches no tracked anchor but its Strength clears the
+        threshold, a quieter feed entry anchored on the relationship's subject
+        Concept (not the inbox).
+
+    The stance is derived structurally — `contradicts` when the pair is now
+    contested, else `new_link` — with no LLM pass. Deduped, so re-admission never
+    re-nags. Commits; returns the Impact ids raised.
+    """
+    raised: list[int] = []
+    for rel in repo.relation_alerts_for_video(video_id, now=now):
+        stance = CONTRADICTS if rel.contested else NEW_LINK
+        anchors = repo.anchors_tracking_relation(rel.src_concept_id, rel.dst_concept_id)
+        if anchors:
+            detail = _relation_detail(rel)
+            for anchor_type, anchor_id in anchors:
+                impact_id = repo.add_impact(
+                    "relation", rel.relation_id, anchor_type, anchor_id, stance,
+                    tier=1, detail=detail,
+                )
+                if impact_id is not None:
+                    raised.append(impact_id)
+        elif rel.strength >= strength_threshold:
+            impact_id = repo.add_impact(
+                "relation", rel.relation_id, "concept", rel.src_concept_id, stance,
+                tier=2, detail=_relation_detail(rel),
+            )
+            if impact_id is not None:
+                raised.append(impact_id)
+    repo.commit()
+    logger.info(
+        "relationship alerting for %s raised %d impact(s)", video_id, len(raised)
+    )
+    return raised
+
+
+def detect_scope_widening(
+    anchor_type: str, anchor_id: int, *, repo: Repository
+) -> list[int]:
+    """One *summary* Impact for the backlog a newly-tracked anchor pulls in (ADR-0013).
+
+    When the owner records a Goal/Decision (or otherwise widens tracked scope), the
+    relationships already sitting under each Concept it tracks must not detonate one
+    Impact each. Instead this raises a single Tier-1 *summary* per newly-tracked
+    Concept — "12 existing connections now in scope" — and then only relationships
+    arriving *afterwards* push (handled by the per-video pass). Deduped on
+    (anchor, concept, new_link), so re-running never re-nags. Commits.
+    """
+    raised: list[int] = []
+    for concept_id in repo.concept_ids_for(anchor_type, anchor_id):
+        backlog = repo.count_relations_touching_subtree(concept_id)
+        if backlog == 0:
+            continue
+        impact_id = repo.add_impact(
+            "concept", concept_id, anchor_type, anchor_id, NEW_LINK, tier=1,
+            detail=f"{backlog} existing connection(s) now in scope — review?",
+        )
+        if impact_id is not None:
+            raised.append(impact_id)
+    repo.commit()
+    logger.info(
+        "scope-widening for %s %s raised %d summary impact(s)",
+        anchor_type, anchor_id, len(raised),
+    )
+    return raised
+
+
+def delete_claim_with_alerts(claim_id: int, *, repo: Repository) -> tuple[bool, list[int]]:
+    """Delete a Claim and raise an `eroded` Impact for any Decision-relied-on
+    relationship it was the last evidence for (ADR-0013, ADR-0005).
+
+    Self-healing made audible: deleting (or superseding) the last Claim behind a
+    relationship removes it — but if a Decision tracked it, the vanishing basis must
+    not go unnoticed (user story 34). Captures the relationships the Claim evidences,
+    deletes the Claim (which prunes any now-unevidenced relationship), then raises an
+    `eroded` Impact on each Decision tracking a relationship that did not survive.
+    Returns `(existed, raised_impact_ids)`. Commits.
+    """
+    before = repo.relations_evidenced_by_claim_detailed(claim_id)
+    existed = repo.delete_claim(claim_id)
+    surviving = repo.existing_relation_ids([rel.id for rel in before])
+    raised: list[int] = []
+    for rel in before:
+        if rel.id in surviving:
+            continue  # still evidenced by another Claim — not eroded
+        for anchor_type, anchor_id in repo.anchors_tracking_relation(
+            rel.src_concept_id, rel.dst_concept_id
+        ):
+            if anchor_type != "decision":
+                continue  # `eroded` is a Decision-relied-on event (user story 34)
+            impact_id = repo.add_impact(
+                "relation", rel.id, "decision", anchor_id, ERODED, tier=1,
+                detail=(
+                    f"The relationship '{rel.src_name} {rel.predicate} {rel.dst_name}' "
+                    "a Decision relied on lost its last evidence (ADR-0013)."
+                ),
+            )
+            if impact_id is not None:
+                raised.append(impact_id)
+    repo.commit()
+    logger.info("deletion of claim %s raised %d eroded impact(s)", claim_id, len(raised))
+    return existed, raised
+
+
+def _relation_detail(rel) -> str:
+    """The "why" line on a relationship Impact — its rendered link and support."""
+    contested = ", contested" if rel.contested else ""
+    return (
+        f"{rel.src_name} {rel.predicate} {rel.dst_name} "
+        f"({rel.creator_count} creator(s){contested})"
+    )
+
+
 # -- inbox & lifecycle ------------------------------------------------------
 
 # The unresolved inbox: an Impact still wanting the owner's attention. A resolved
@@ -168,16 +311,30 @@ def inbox(
     state: str | None = None,
     repo: Repository,
 ) -> list[Impact]:
-    """The Impact inbox: unresolved findings, filterable by stance and anchor.
+    """The Impact inbox: unresolved *Tier-1* findings, filterable by stance and anchor.
 
     With no `state` given it shows the unresolved `new`/`reviewed` Impacts (the
     nagging ones); an explicit `state` narrows to exactly that lifecycle position
-    (e.g. to review what was `dismissed`). Read-only.
+    (e.g. to review what was `dismissed`). Only the push tier reaches the inbox; the
+    quieter Tier-2 structural changes live in `tier2_feed` (ADR-0013). Read-only.
     """
     states = [state] if state is not None else _UNRESOLVED
     return repo.list_impacts(
-        stance=stance, anchor_type=anchor_type, anchor_id=anchor_id, states=states
+        stance=stance, anchor_type=anchor_type, anchor_id=anchor_id, states=states,
+        tier=1,
     )
+
+
+def tier2_feed(
+    *, stance: str | None = None, repo: Repository
+) -> list[Impact]:
+    """The quieter Tier-2 browsable feed of notable structural changes (ADR-0013).
+
+    Field-wide relationship developments that touch no tracked anchor but cleared
+    the Strength threshold — available on demand, deliberately *not* in the push
+    inbox, so a discovery is findable without flooding the owner. Read-only.
+    """
+    return repo.list_impacts(stance=stance, states=_UNRESOLVED, tier=2)
 
 
 def review_impact(impact_id: int, *, repo: Repository) -> bool:

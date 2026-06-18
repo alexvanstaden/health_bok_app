@@ -652,24 +652,37 @@ class Impact:
     detail: str | None
     actioned_decision_id: int | None
     created_at: datetime
+    tier: int = 1
 
 
 # The inbox projection: an Impact with both polymorphic ends' labels resolved by
 # LEFT JOINs (only the matching side is non-NULL). The marker label is built in the
-# mapper from its parts, so the SQL stays free of numeric string-building.
+# mapper from its parts, so the SQL stays free of numeric string-building. A
+# `relation` source and a `concept` anchor (ADR-0013) are resolved the same way; a
+# relationship that has since eroded LEFT-JOINs to NULL and falls back to `detail`.
 _IMPACT_SELECT = (
     "SELECT i.id, i.source_type, i.source_id, scl.text, sp.action, "
     "       i.anchor_type, i.anchor_id, ad.action, ag.title, "
     "       ac.name, am.value, am.unit, am.reference_low, am.reference_high, "
-    "       i.stance, i.state, i.detail, i.actioned_decision_id, i.created_at "
+    "       i.stance, i.state, i.detail, i.actioned_decision_id, i.created_at, "
+    "       i.tier, srsrc.name, sr.predicate, srdst.name, acpt.name "
     "FROM impacts i "
     "LEFT JOIN claims scl ON i.source_type = 'claim' AND scl.id = i.source_id "
     "LEFT JOIN protocols sp ON i.source_type = 'protocol' AND sp.id = i.source_id "
+    "LEFT JOIN concept_relations sr ON i.source_type = 'relation' AND sr.id = i.source_id "
+    "LEFT JOIN concepts srsrc ON srsrc.id = sr.src_concept_id "
+    "LEFT JOIN concepts srdst ON srdst.id = sr.dst_concept_id "
     "LEFT JOIN decisions ad ON i.anchor_type = 'decision' AND ad.id = i.anchor_id "
     "LEFT JOIN goals ag ON i.anchor_type = 'goal' AND ag.id = i.anchor_id "
     "LEFT JOIN markers am ON i.anchor_type = 'marker' AND am.id = i.anchor_id "
-    "LEFT JOIN concepts ac ON i.anchor_type = 'marker' AND ac.id = am.concept_id"
+    "LEFT JOIN concepts ac ON i.anchor_type = 'marker' AND ac.id = am.concept_id "
+    "LEFT JOIN concepts acpt ON i.anchor_type = 'concept' AND acpt.id = i.anchor_id"
 )
+
+
+def _relation_label(src: str, predicate: str, dst: str) -> str:
+    """A lateral relationship rendered for the inbox: "APOE4 risk_factor_for Alzheimer's"."""
+    return f"{src} {predicate} {dst}"
 
 
 def _row_to_impact(r) -> Impact:
@@ -677,13 +690,27 @@ def _row_to_impact(r) -> Impact:
         anchor_label = r[7]
     elif r[5] == "goal":
         anchor_label = r[8]
+    elif r[5] == "concept":
+        anchor_label = r[23]
     else:  # marker
         anchor_label = _marker_label(r[9], r[10], r[11], r[12], r[13])
+    if r[1] == "claim":
+        source_label = r[3]
+    elif r[1] == "protocol":
+        source_label = r[4]
+    elif r[1] == "relation":
+        # An eroded relationship's row is gone (LEFT JOIN NULL) -> use the detail.
+        source_label = (
+            _relation_label(r[20], r[21], r[22]) if r[20] is not None
+            else (r[16] or "(removed relationship)")
+        )
+    else:  # 'concept' source (a scope-widening summary)
+        source_label = r[16] or ""
     return Impact(
         id=r[0],
         source_type=r[1],
         source_id=r[2],
-        source_label=r[3] if r[1] == "claim" else r[4],
+        source_label=source_label,
         anchor_type=r[5],
         anchor_id=r[6],
         anchor_label=anchor_label,
@@ -692,6 +719,7 @@ def _row_to_impact(r) -> Impact:
         detail=r[16],
         actioned_decision_id=r[17],
         created_at=r[18],
+        tier=r[19],
     )
 
 
@@ -1425,6 +1453,42 @@ class Repository:
             )
             return [r[0] for r in cur.fetchall()]
 
+    def relations_evidenced_by_claim_detailed(self, claim_id: int) -> list[ConceptRelation]:
+        """The relationships a Claim evidences, with endpoints resolved (ADR-0013).
+
+        Captured *before* a delete/supersede so the alerting layer can tell which of
+        them erode (lose their last evidence) and on which Concepts, after the Claim
+        and its evidence links are gone.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT cr.id, cr.src_concept_id, src.name, cr.predicate, "
+                "       cr.dst_concept_id, dst.name "
+                "FROM concept_relation_evidence cre "
+                "JOIN concept_relations cr ON cr.id = cre.relation_id "
+                "JOIN concepts src ON src.id = cr.src_concept_id "
+                "JOIN concepts dst ON dst.id = cr.dst_concept_id "
+                "WHERE cre.claim_id = %s ORDER BY cr.id",
+                (claim_id,),
+            )
+            return [
+                ConceptRelation(
+                    id=r[0], src_concept_id=r[1], src_name=r[2], predicate=r[3],
+                    dst_concept_id=r[4], dst_name=r[5], evidence_claim_ids=[],
+                )
+                for r in cur.fetchall()
+            ]
+
+    def existing_relation_ids(self, relation_ids: list[int]) -> set[int]:
+        """Which of `relation_ids` still exist — the survivors of a prune (ADR-0013)."""
+        if not relation_ids:
+            return set()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM concept_relations WHERE id = ANY(%s)", (relation_ids,)
+            )
+            return {r[0] for r in cur.fetchall()}
+
     def list_concept_relations(self) -> list[ConceptRelation]:
         """Every lateral relationship with its evidencing Claim ids (ADR-0013).
 
@@ -1477,6 +1541,29 @@ class Repository:
                 "      AND e.dst_type = 'concept' "
                 "      AND COALESCE(e.props->>'confirmed', 'false') = 'true' "
                 ") SELECT id FROM subtree",
+                (concept_id,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def ancestor_concept_ids(self, concept_id: int) -> list[int]:
+        """A Concept and every Concept *above* it in the confirmed `broader-of` DAG.
+
+        The mirror of `descendant_concept_ids`, walking confirmed `broader-of` edges
+        upward (narrower → broader). Used by relationship alerting (ADR-0013): a
+        relationship touching Concept X is relevant to a Goal/Decision tracking *any*
+        ancestor of X, so tracking "Brain" catches a development on "Brain
+        metabolism" without tracking every leaf (user story 31).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "WITH RECURSIVE supertree(id) AS ("
+                "    SELECT %s::bigint "
+                "  UNION "
+                "    SELECT e.src_id FROM edges e JOIN supertree s ON e.dst_id = s.id "
+                "    WHERE e.kind = 'broader-of' AND e.src_type = 'concept' "
+                "      AND e.dst_type = 'concept' "
+                "      AND COALESCE(e.props->>'confirmed', 'false') = 'true' "
+                ") SELECT id FROM supertree",
                 (concept_id,),
             )
             return [r[0] for r in cur.fetchall()]
@@ -2791,6 +2878,148 @@ class Repository:
             )
             return [r[0] for r in cur.fetchall()]
 
+    # -- relationship alerting candidates (ADR-0013) -------------------------
+
+    def anchors_tracking_relation(
+        self, src_concept_id: int, dst_concept_id: int
+    ) -> list[tuple[str, int]]:
+        """Goals/Decisions a relationship is relevant to — Tier-1 targets (ADR-0013).
+
+        A Goal/Decision tracks a relationship when it references a Concept that is an
+        *ancestor-or-self* of either endpoint — so a development on a descendant
+        ("Brain metabolism") reaches a Goal tracking the broader "Brain" (user story
+        31). Returns distinct (anchor_type, anchor_id), Goals and Decisions only.
+        """
+        relevant = set(self.ancestor_concept_ids(src_concept_id))
+        relevant |= set(self.ancestor_concept_ids(dst_concept_id))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT e.src_type, e.src_id FROM edges e "
+                "WHERE e.kind = 'references' AND e.dst_type = 'concept' "
+                "AND e.src_type IN ('goal', 'decision') AND e.dst_id = ANY(%s) "
+                "ORDER BY e.src_type, e.src_id",
+                (list(relevant),),
+            )
+            return [(r[0], r[1]) for r in cur.fetchall()]
+
+    def relation_alerts_for_video(
+        self,
+        video_id: str,
+        *,
+        now: datetime | None = None,
+        half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+    ) -> list[NeighbourRelation]:
+        """The lateral relationships a freshly-admitted video evidences (ADR-0013).
+
+        Each is returned with its Strength, distinct-creator count, and whether the
+        pair is now `contested` (an opposite or `no_effect_on` predicate also holds
+        on it, computed over *all* relations on the pair, not just this video's), so
+        the alerting pass can derive a stance structurally and gate Tier-2 by
+        Strength — no LLM. Strongest first.
+        """
+        now = now or datetime.now(timezone.utc)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT cr.id, cr.src_concept_id, src.name, cr.predicate, "
+                "       cr.dst_concept_id, dst.name "
+                "FROM concept_relations cr "
+                "JOIN concepts src ON src.id = cr.src_concept_id "
+                "JOIN concepts dst ON dst.id = cr.dst_concept_id "
+                "JOIN concept_relation_evidence cre ON cre.relation_id = cr.id "
+                "JOIN claims cl ON cl.id = cre.claim_id "
+                "WHERE cl.video_id = %s",
+                (video_id,),
+            )
+            base = cur.fetchall()
+        if not base:
+            return []
+        return self._relation_metrics(
+            [r[0] for r in base], now=now, half_life_days=half_life_days
+        )
+
+    def count_relations_touching_subtree(self, concept_id: int) -> int:
+        """How many relationships touch a Concept's subtree — the scope-widening
+        backlog (ADR-0013). Counts distinct relationships with either endpoint in the
+        confirmed `broader-of` subtree of `concept_id` (including itself)."""
+        subtree = self.descendant_concept_ids(concept_id)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM concept_relations "
+                "WHERE src_concept_id = ANY(%(ids)s) OR dst_concept_id = ANY(%(ids)s)",
+                {"ids": subtree},
+            )
+            return cur.fetchone()[0]
+
+    def _relation_metrics(
+        self, relation_ids: list[int], *, now: datetime, half_life_days: float
+    ) -> list[NeighbourRelation]:
+        """Build NeighbourRelations (Strength, creator count, contested) for the ids."""
+        if not relation_ids:
+            return []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT cr.id, cr.src_concept_id, src.name, cr.predicate, "
+                "       cr.dst_concept_id, dst.name, "
+                "       cre.claim_id, v.creator_id, creators.trust_tier, v.published_at "
+                "FROM concept_relations cr "
+                "JOIN concepts src ON src.id = cr.src_concept_id "
+                "JOIN concepts dst ON dst.id = cr.dst_concept_id "
+                "JOIN concept_relation_evidence cre ON cre.relation_id = cr.id "
+                "JOIN claims cl ON cl.id = cre.claim_id "
+                "JOIN videos v ON v.video_id = cl.video_id "
+                "JOIN creators ON creators.id = v.creator_id "
+                "WHERE cr.id = ANY(%s)",
+                (relation_ids,),
+            )
+            rows = cur.fetchall()
+            # All predicates on each touched ordered pair, for the contested check.
+            cur.execute(
+                "SELECT src_concept_id, dst_concept_id, "
+                "       array_agg(DISTINCT predicate) "
+                "FROM concept_relations "
+                "WHERE (src_concept_id, dst_concept_id) IN ("
+                "  SELECT src_concept_id, dst_concept_id FROM concept_relations "
+                "  WHERE id = ANY(%s)) "
+                "GROUP BY src_concept_id, dst_concept_id",
+                (relation_ids,),
+            )
+            pair_predicates = {(r[0], r[1]): list(r[2]) for r in cur.fetchall()}
+
+        grouped: dict[int, dict] = {}
+        for r in rows:
+            rel = grouped.setdefault(
+                r[0],
+                {"src_id": r[1], "src_name": r[2], "predicate": r[3],
+                 "dst_id": r[4], "dst_name": r[5], "claim_ids": set(), "contribs": []},
+            )
+            rel["claim_ids"].add(r[6])
+            rel["contribs"].append(
+                EvidenceContribution(creator_id=r[7], trust_tier=r[8], dated=r[9])
+            )
+
+        result: list[NeighbourRelation] = []
+        for relation_id, rel in grouped.items():
+            others = pair_predicates.get((rel["src_id"], rel["dst_id"]), [])
+            contested = any(contradicts(rel["predicate"], p) for p in others)
+            result.append(
+                NeighbourRelation(
+                    relation_id=relation_id,
+                    src_concept_id=rel["src_id"],
+                    src_name=rel["src_name"],
+                    predicate=rel["predicate"],
+                    dst_concept_id=rel["dst_id"],
+                    dst_name=rel["dst_name"],
+                    strength=relation_strength(
+                        rel["contribs"], now=now, half_life_days=half_life_days
+                    ),
+                    creator_count=distinct_creator_count(rel["contribs"]),
+                    contested=contested,
+                    evidence_claim_ids=sorted(rel["claim_ids"]),
+                )
+            )
+        result.sort(key=lambda x: (-x.strength, x.relation_id))
+        return result
+
     # -- persistence, inbox & lifecycle (writes/reads) -----------------------
 
     def add_impact(
@@ -2802,20 +3031,22 @@ class Repository:
         stance: str,
         *,
         detail: str | None = None,
+        tier: int = 1,
     ) -> int | None:
         """Persist a deduped Impact; ``None`` if the same finding already exists.
 
         The unique constraint `(anchor, source, stance)` makes a re-run or an
         overlapping piece of evidence raise nothing the second time — and a resolved
-        Impact's surviving row keeps it from re-nagging (issue #18). Does not commit.
+        Impact's surviving row keeps it from re-nagging (issue #18). `tier` is 1 for
+        the push inbox, 2 for the quieter browsable feed (ADR-0013). Does not commit.
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO impacts (source_type, source_id, anchor_type, anchor_id, "
-                "stance, detail) VALUES (%s, %s, %s, %s, %s, %s) "
+                "stance, detail, tier) VALUES (%s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (anchor_type, anchor_id, source_type, source_id, stance) "
                 "DO NOTHING RETURNING id",
-                (source_type, source_id, anchor_type, anchor_id, stance, detail),
+                (source_type, source_id, anchor_type, anchor_id, stance, detail, tier),
             )
             row = cur.fetchone()
         return row[0] if row else None
@@ -2827,13 +3058,14 @@ class Repository:
         anchor_type: str | None = None,
         anchor_id: int | None = None,
         states: list[str] | None = None,
+        tier: int | None = None,
     ) -> list[Impact]:
-        """The Impact inbox, newest first — filterable by stance, anchor, and state.
+        """The Impact inbox, newest first — filterable by stance, anchor, state, tier.
 
         `states` narrows to a lifecycle subset (the default inbox passes the
         unresolved `new`/`reviewed`); `anchor_type`/`anchor_id` filter to one
-        anchor; `stance` to one stance (issue #18). Each Impact carries both ends'
-        labels resolved.
+        anchor; `stance` to one stance; `tier` to the push inbox (1) or the
+        browsable feed (2) — ADR-0013. Each Impact carries both ends' labels.
         """
         where: list[str] = []
         params: dict = {}
@@ -2849,6 +3081,9 @@ class Repository:
         if states:
             where.append("i.state = ANY(%(states)s)")
             params["states"] = list(states)
+        if tier is not None:
+            where.append("i.tier = %(tier)s")
+            params["tier"] = tier
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         with self._conn.cursor() as cur:
             cur.execute(

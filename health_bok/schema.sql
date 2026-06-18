@@ -546,3 +546,28 @@ DROP TRIGGER IF EXISTS edges_broader_of_no_cycle ON edges;
 CREATE TRIGGER edges_broader_of_no_cycle
     BEFORE INSERT OR UPDATE ON edges
     FOR EACH ROW EXECUTE FUNCTION edges_broader_of_acyclic();
+
+-- Relationship-aware alerting (ADR-0013) extends the one Impact inbox rather than
+-- adding a second. Impacts gain:
+--   * a `relation` source — the lateral relationship that changed (alongside the
+--     existing claim/protocol sources);
+--   * a `concept` anchor — for the Tier-2 browsable feed, where a notable
+--     structural change is anchored on a Concept rather than a Goal/Decision;
+--   * two structurally-derived stances, `new_link` (a sign-neutral connection
+--     appeared / a backlog summary) and `eroded` (a relationship a Decision relied
+--     on lost its last evidence);
+--   * a `tier`: Tier-1 (1) is the push inbox, Tier-2 (2) the quieter pull feed.
+-- All migrations are idempotent (the CHECKs are dropped and re-added by name).
+ALTER TABLE impacts DROP CONSTRAINT IF EXISTS impacts_source_type_check;
+ALTER TABLE impacts ADD CONSTRAINT impacts_source_type_check
+    CHECK (source_type IN ('claim', 'protocol', 'relation', 'concept'));
+ALTER TABLE impacts DROP CONSTRAINT IF EXISTS impacts_anchor_type_check;
+ALTER TABLE impacts ADD CONSTRAINT impacts_anchor_type_check
+    CHECK (anchor_type IN ('decision', 'goal', 'marker', 'concept'));
+ALTER TABLE impacts DROP CONSTRAINT IF EXISTS impacts_stance_check;
+ALTER TABLE impacts ADD CONSTRAINT impacts_stance_check
+    CHECK (stance IN ('reinforces', 'contradicts', 'refines', 'opportunity',
+                      'new_link', 'eroded'));
+ALTER TABLE impacts ADD COLUMN IF NOT EXISTS tier INTEGER NOT NULL DEFAULT 1
+    CHECK (tier IN (1, 2));
+CREATE INDEX IF NOT EXISTS impacts_tier ON impacts (tier, state);
