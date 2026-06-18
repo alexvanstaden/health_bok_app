@@ -101,8 +101,10 @@ boundary. In it you:
   newly-contested relationship touching a Concept your Goals/Decisions track — *or anything in
   that Concept's subtree* — pushes a **Tier-1** alert (`new_link`/`contradicts`); a
   relationship a Decision relied on losing its last evidence pushes `eroded`; widening your
-  scope raises a single *summary* Impact, not a burst; and other notable structural changes go
-  to a quieter **Tier-2** browsable feed gated by Strength, not the inbox.
+  scope — recording a Goal/Decision, or confirming a `broader-of` edge that pulls a subtree
+  under a tracked Concept — raises a single *summary* Impact for the pre-existing backlog (then
+  only edges arriving afterwards push); and other notable structural changes go to a quieter
+  **Tier-2** browsable feed gated by Strength, not the inbox.
 - **See the Logs.** A read-only record of every video Source that reached a terminal
   admission, newest-first — each with its title, its Creator, the date it was added, a snippet
   of its latest Summary, and a **BoK-state** badge (*admitted · failed*) distinguishing what

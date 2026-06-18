@@ -138,6 +138,24 @@ def _detect_anchor_impacts(repo: Repository, anchor_type: str, anchor_id: int) -
                        anchor_type, anchor_id, exc)
 
 
+def _detect_broader_of_scope_widening(
+    repo: Repository, broader_id: int, narrower_id: int
+) -> None:
+    """Raise the scope-widening summary a just-confirmed `broader-of` edge owes.
+
+    Best-effort, like the anchor pass: the edge is already committed, so a detection
+    hiccup is logged and swallowed rather than failing the confirm. Structural and
+    deterministic — no LLM (ADR-0013)."""
+    try:
+        impacts.detect_scope_widening_for_broader_of(
+            broader_id, narrower_id, repo=repo
+        )
+    except Exception as exc:  # detection is a follow-on; never fail the write
+        repo.rollback()
+        logger.warning("scope-widening detection failed for broader-of %s>%s: %s",
+                       broader_id, narrower_id, exc)
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
@@ -663,6 +681,8 @@ def confirm_broader_of(narrower_id: int, broader_id: int) -> dict:
     """Confirm a proposed `broader-of` edge, making it visible to roll-up (ADR-0013)."""
     with _repo() as repo:
         ok = curation.confirm_broader_of(broader_id, narrower_id, repo=repo)
+        if ok:
+            _detect_broader_of_scope_widening(repo, broader_id, narrower_id)
     if not ok:
         raise HTTPException(status_code=404, detail="no such proposed edge")
     return {"broader_id": broader_id, "narrower_id": narrower_id, "confirmed": True}

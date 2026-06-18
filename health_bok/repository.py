@@ -2992,13 +2992,32 @@ class Repository:
         """
         relevant = set(self.ancestor_concept_ids(src_concept_id))
         relevant |= set(self.ancestor_concept_ids(dst_concept_id))
+        return self._anchors_referencing(relevant)
+
+    def anchors_tracking_concept(self, concept_id: int) -> list[tuple[str, int]]:
+        """Goals/Decisions that track a Concept via ancestor-or-self (ADR-0013).
+
+        A Goal/Decision tracks `concept_id` when it references it *or any of its
+        ancestors* in the confirmed `broader-of` DAG — so confirming a `broader-of`
+        edge that pulls a subtree under "Brain" must notify the Goals tracking
+        "Brain" (or anything above it). The scope-widening counterpart of
+        `anchors_tracking_relation`. Returns distinct (anchor_type, anchor_id).
+        """
+        return self._anchors_referencing(set(self.ancestor_concept_ids(concept_id)))
+
+    def _anchors_referencing(
+        self, concept_ids: set[int]
+    ) -> list[tuple[str, int]]:
+        """Distinct Goal/Decision anchors referencing any of `concept_ids`."""
+        if not concept_ids:
+            return []
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT DISTINCT e.src_type, e.src_id FROM edges e "
                 "WHERE e.kind = 'references' AND e.dst_type = 'concept' "
                 "AND e.src_type IN ('goal', 'decision') AND e.dst_id = ANY(%s) "
                 "ORDER BY e.src_type, e.src_id",
-                (list(relevant),),
+                (list(concept_ids),),
             )
             return [(r[0], r[1]) for r in cur.fetchall()]
 

@@ -249,6 +249,42 @@ def detect_scope_widening(
     return raised
 
 
+def detect_scope_widening_for_broader_of(
+    broader_id: int, narrower_id: int, *, repo: Repository
+) -> list[int]:
+    """One *summary* Impact when a confirmed `broader-of` edge widens scope (ADR-0013).
+
+    The other half of scope-widening: where `detect_scope_widening` fires when a new
+    anchor is recorded, this fires when an owner confirms a `broader-of` edge that
+    pulls the narrower Concept's subtree under a Concept already tracked by a
+    Goal/Decision. The relationships already sitting in that newly-pulled subtree
+    must not detonate one Impact each, so this raises a single Tier-1 *summary* per
+    tracking anchor — "12 existing connections now under Brain — review?" — and then
+    only relationships arriving *afterwards* push (the per-video pass). Deduped on
+    (anchor, narrower-Concept, new_link), so re-confirming never re-nags. Commits.
+    """
+    backlog = repo.count_relations_touching_subtree(narrower_id)
+    if backlog == 0:
+        repo.commit()
+        return []
+    broader = repo.get_concept(broader_id)
+    where = f"under {broader.name}" if broader is not None else "in scope"
+    raised: list[int] = []
+    for anchor_type, anchor_id in repo.anchors_tracking_concept(broader_id):
+        impact_id = repo.add_impact(
+            "concept", narrower_id, anchor_type, anchor_id, NEW_LINK, tier=1,
+            detail=f"{backlog} existing connection(s) now {where} — review?",
+        )
+        if impact_id is not None:
+            raised.append(impact_id)
+    repo.commit()
+    logger.info(
+        "scope-widening for broader-of %s>%s raised %d summary impact(s)",
+        broader_id, narrower_id, len(raised),
+    )
+    return raised
+
+
 def delete_claim_with_alerts(claim_id: int, *, repo: Repository) -> tuple[bool, list[int]]:
     """Delete a Claim and raise an `eroded` Impact for any Decision-relied-on
     relationship it was the last evidence for (ADR-0013, ADR-0005).
