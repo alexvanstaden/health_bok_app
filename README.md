@@ -171,7 +171,8 @@ health_bok/
 ├── impacts.py       the Impact engine: forward/reverse/supersede + relationship (Tier-1/Tier-2) detection + inbox lifecycle
 ├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle + forward Impact + relationship pass
 ├── api.py           FastAPI HTTP API the Web App calls: review · BoK · personal · query · Impacts
-├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `creators …`
+├── reprocess.py     one-off backfill: re-establish lateral Relationships across the existing library (#64)
+├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `reprocess-relationships` · `creators …`
 └── adapters/        youtube · whisper · claude · resend · extractor · embedder · answerer · stance
 
 web/                 the Next.js Web App — review queue, BoK browser, personal layer, Ask, Impacts, Logs
@@ -255,6 +256,22 @@ pip install -e ".[web,dev]"
 uvicorn health_bok.api:app --reload      # the API
 health-bok worker                        # drain the admission queue
 ```
+
+**Backfill lateral Relationships across the existing library** (a one-off, issue #64).
+Lateral Relationships are derived only at admit time from a Claim's predicate triples,
+so anything admitted before triple-aware extraction shipped has none. This command
+re-extracts every already-admitted video from its **archived Transcript** through the
+supersede path, re-projecting each Claim's triples into the Concept graph:
+
+```bash
+health-bok reprocess-relationships       # needs OPENAI_API_KEY (+ ANTHROPIC_API_KEY if used)
+```
+
+No YouTube re-fetch and no Whisper occur (a video without an archived Transcript is
+reported and skipped). It is a normal supersede: non-protected Claims are regenerated,
+owner-edited (protected) Claims are left untouched. The run is **resumable and
+idempotent** — it commits per video, skips videos a prior run already finished, and a
+second run is a no-op, so it is safe to re-run after an interruption.
 
 > **Dependency note:** the Web App pins `next@14.2.x` (latest patched). The remaining
 > `npm audit` advisories are Next.js DoS classes fixed only by a major upgrade and a
