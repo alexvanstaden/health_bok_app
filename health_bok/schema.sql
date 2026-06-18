@@ -431,3 +431,143 @@ CREATE TABLE IF NOT EXISTS impacts (
 );
 CREATE INDEX IF NOT EXISTS impacts_inbox ON impacts (state, stance);
 CREATE INDEX IF NOT EXISTS impacts_by_anchor ON impacts (anchor_type, anchor_id);
+
+
+-- ===========================================================================
+-- ADR-0013: Concepts connect to each other.
+--
+-- Two distinct families of Concept->Concept link, stored differently:
+--   * Lateral relationships — claim-grounded, derived, self-healing — in the
+--     typed `concept_relations` table below, with an evidence link back to the
+--     Claims that assert them (NOT the polymorphic `edges` table, whose `kind`
+--     CHECK would balloon under the predicate set).
+--   * Hierarchy (`broader-of`) — an owner-curated taxonomic edge — is a single new
+--     `kind` in the existing `edges` table (added in the `edges` CHECK above when
+--     slice 3 lands).
+-- Plus an owner-set trust-tier on `creators`, so relationship Strength can weight
+-- trusted sources more (ADR-0013 "Strength").
+-- ===========================================================================
+
+-- Owner-set trust-tier on a Creator (ADR-0013 "Strength"): higher = more trusted,
+-- so a relationship's Strength weights its distinct creators by how much the owner
+-- trusts each. Defaults to 1 so an untiered Creator counts as a plain distinct
+-- creator — Strength is a distinct-creator count until the owner tiers anyone
+-- (user story 29). Idempotent add for a database created before ADR-0013.
+ALTER TABLE creators ADD COLUMN IF NOT EXISTS trust_tier INTEGER NOT NULL DEFAULT 1
+    CHECK (trust_tier >= 1);
+
+-- A lateral relationship: a directed, typed Concept->Concept link
+-- ("APOE4 `risk_factor_for` Alzheimer's"), ADR-0013. It is a *materialized
+-- projection of Claims*, not a curated object: derived at admit time from the
+-- Claim's predicate triples and recomputed on supersede/delete (ADR-0005). The
+-- predicate is CHECK-constrained to the lean, signed, extensible vocabulary
+-- (`health_bok.predicates`) — a small lookup, not a Postgres ENUM, consistent with
+-- ADR-0008's treatment of edge `kind`; contradiction is *derived* from polarity in
+-- code, never stored. The UNIQUE on (src, predicate, dst) makes derivation
+-- idempotent: re-admitting the same Claim re-asserts the same relationship.
+CREATE TABLE IF NOT EXISTS concept_relations (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    src_concept_id BIGINT NOT NULL REFERENCES concepts (id),
+    predicate      TEXT   NOT NULL
+                          CHECK (predicate IN (
+                              'protects_against', 'risk_factor_for',
+                              'increases', 'decreases',
+                              'treats', 'worsens',
+                              'biomarker_of', 'measured_by', 'mechanism_of',
+                              'no_effect_on', 'associated_with')),
+    dst_concept_id BIGINT NOT NULL REFERENCES concepts (id),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A self-loop is never a meaningful relationship; reject it at the database.
+    CHECK (src_concept_id <> dst_concept_id),
+    UNIQUE (src_concept_id, predicate, dst_concept_id)
+);
+CREATE INDEX IF NOT EXISTS concept_relations_by_src ON concept_relations (src_concept_id);
+CREATE INDEX IF NOT EXISTS concept_relations_by_dst ON concept_relations (dst_concept_id);
+
+-- The evidence link: which Claim(s) assert each lateral relationship (ADR-0013).
+-- This is what makes a relationship claim-grounded and self-healing — its truth
+-- comes only from the owner's Claims (ADR-0011). A Claim's deletion cascades its
+-- evidence away; the derivation layer then removes any relationship left with no
+-- evidence (raising an `eroded` Impact rather than letting it vanish silently).
+CREATE TABLE IF NOT EXISTS concept_relation_evidence (
+    relation_id BIGINT NOT NULL REFERENCES concept_relations (id) ON DELETE CASCADE,
+    claim_id    BIGINT NOT NULL REFERENCES claims (id) ON DELETE CASCADE,
+    PRIMARY KEY (relation_id, claim_id)
+);
+CREATE INDEX IF NOT EXISTS relation_evidence_by_claim
+    ON concept_relation_evidence (claim_id);
+
+-- Hierarchy: `broader-of` is a structural, low-cardinality Concept→Concept edge, so
+-- it lives in the polymorphic `edges` table as one new `kind` (ADR-0013 amends
+-- ADR-0008) — unlike the volatile lateral predicate set, which got its own table.
+-- An edge `broader --broader-of--> narrower` is owner-curated taxonomy: it carries
+-- `props.confirmed` ('false' = a proposed suggestion, invisible to roll-up;
+-- 'true' = the owner confirmed it). Idempotent migration for a database created
+-- before ADR-0013 (the inline CHECK above reserved only the five original kinds).
+ALTER TABLE edges DROP CONSTRAINT IF EXISTS edges_kind_check;
+ALTER TABLE edges ADD CONSTRAINT edges_kind_check
+    CHECK (kind IN ('references', 'supports', 'implements', 'serves',
+                    'motivated_by', 'broader-of'));
+
+-- Cycle guard: `broader-of` forms a DAG (multi-parent but acyclic), so roll-up and
+-- subtree traversal always terminate (user story 17). This BEFORE trigger rejects
+-- any `broader-of` edge that would close a loop — a self-loop, or an edge whose
+-- narrower endpoint can already reach the broader one by following `broader-of`
+-- (in the spirit of ADR-0008's edge-integrity trigger). It considers all
+-- `broader-of` edges (proposed or confirmed), so confirming a proposal can never
+-- introduce a cycle either.
+CREATE OR REPLACE FUNCTION edges_broader_of_acyclic()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.kind <> 'broader-of' THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.src_id = NEW.dst_id THEN
+        RAISE EXCEPTION 'broader-of: a Concept cannot be broader of itself (%)', NEW.src_id;
+    END IF;
+    IF EXISTS (
+        WITH RECURSIVE reach(id) AS (
+            SELECT NEW.dst_id
+          UNION
+            SELECT e.dst_id FROM edges e JOIN reach r ON e.src_id = r.id
+            WHERE e.kind = 'broader-of'
+              AND e.src_type = 'concept' AND e.dst_type = 'concept'
+        )
+        SELECT 1 FROM reach WHERE id = NEW.src_id
+    ) THEN
+        RAISE EXCEPTION 'broader-of: edge % -> % would create a hierarchy cycle',
+            NEW.src_id, NEW.dst_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS edges_broader_of_no_cycle ON edges;
+CREATE TRIGGER edges_broader_of_no_cycle
+    BEFORE INSERT OR UPDATE ON edges
+    FOR EACH ROW EXECUTE FUNCTION edges_broader_of_acyclic();
+
+-- Relationship-aware alerting (ADR-0013) extends the one Impact inbox rather than
+-- adding a second. Impacts gain:
+--   * a `relation` source — the lateral relationship that changed (alongside the
+--     existing claim/protocol sources);
+--   * a `concept` anchor — for the Tier-2 browsable feed, where a notable
+--     structural change is anchored on a Concept rather than a Goal/Decision;
+--   * two structurally-derived stances, `new_link` (a sign-neutral connection
+--     appeared / a backlog summary) and `eroded` (a relationship a Decision relied
+--     on lost its last evidence);
+--   * a `tier`: Tier-1 (1) is the push inbox, Tier-2 (2) the quieter pull feed.
+-- All migrations are idempotent (the CHECKs are dropped and re-added by name).
+ALTER TABLE impacts DROP CONSTRAINT IF EXISTS impacts_source_type_check;
+ALTER TABLE impacts ADD CONSTRAINT impacts_source_type_check
+    CHECK (source_type IN ('claim', 'protocol', 'relation', 'concept'));
+ALTER TABLE impacts DROP CONSTRAINT IF EXISTS impacts_anchor_type_check;
+ALTER TABLE impacts ADD CONSTRAINT impacts_anchor_type_check
+    CHECK (anchor_type IN ('decision', 'goal', 'marker', 'concept'));
+ALTER TABLE impacts DROP CONSTRAINT IF EXISTS impacts_stance_check;
+ALTER TABLE impacts ADD CONSTRAINT impacts_stance_check
+    CHECK (stance IN ('reinforces', 'contradicts', 'refines', 'opportunity',
+                      'new_link', 'eroded'));
+ALTER TABLE impacts ADD COLUMN IF NOT EXISTS tier INTEGER NOT NULL DEFAULT 1
+    CHECK (tier IN (1, 2));
+CREATE INDEX IF NOT EXISTS impacts_tier ON impacts (tier, state);

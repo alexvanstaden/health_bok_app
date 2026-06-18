@@ -312,6 +312,36 @@ class FakeConceptProposer:
         return list(self._concepts)
 
 
+class FakeHierarchyProposer:
+    """Fakes the HierarchyProposer port (ADR-0013): returns canned broader parents for
+    a Concept, or raises — so the roll-up suggester is driven over a *real* Postgres
+    catalogue without the Claude API.
+
+    `parents` are the parent names to propose; only those also present in the
+    `nearby` cluster it is given are returned (mirroring the real adapter, which
+    constrains parents to the nearby set). An `error` exercises the graceful-degrade
+    path (an LLM failure yielding no suggestions). Records each `(concept_name,
+    nearby)` it was asked.
+    """
+
+    def __init__(
+        self,
+        parents: list[str] | None = None,
+        *,
+        error: Exception | None = None,
+    ):
+        self._parents = list(parents or [])
+        self._error = error
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def propose(self, concept_name: str, nearby: list[str]) -> list[str]:
+        self.calls.append((concept_name, list(nearby)))
+        if self._error is not None:
+            raise self._error
+        allowed = set(nearby)
+        return [p for p in self._parents if p in allowed]
+
+
 def _synthesize(question: str, evidence: RetrievedEvidence) -> str:
     """A canned synthesized answer woven from the retrieved Claims (not a list)."""
     return "Based on your library: " + " ".join(c.text for c in evidence.claims)

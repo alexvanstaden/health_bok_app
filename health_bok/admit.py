@@ -29,7 +29,7 @@ import logging
 from dataclasses import dataclass
 
 from .concepts import ConceptNormalizer
-from .models import ConceptMention, ExtractedProtocol
+from .models import ConceptMention, ConceptTriple, ExtractedProtocol
 from .ports import Extractor
 from .repository import Repository
 
@@ -83,6 +83,7 @@ def admit_candidate(
         _link_concepts(
             "claim", claim_id, claim.concepts, normalizer, repo, concepts_touched
         )
+        _derive_relations(claim_id, claim.triples, normalizer, repo, concepts_touched)
         claims_admitted += 1
 
     for protocol in extraction.protocols:
@@ -143,6 +144,33 @@ def _link_concepts(
         concept_id = normalizer.resolve(mention)
         repo.add_edge(src_type, src_id, "concept", concept_id, "references")
         touched.add(concept_id)
+
+
+def _derive_relations(
+    claim_id: int,
+    triples: list[ConceptTriple],
+    normalizer: ConceptNormalizer,
+    repo: Repository,
+    touched: set[int],
+) -> None:
+    """Project a Claim's directed triples into claim-grounded lateral relationships.
+
+    The materialization step (ADR-0013): each (subject, predicate, object) triple
+    becomes a `concept_relations` row evidenced by this Claim, its endpoints
+    normalized onto canonical Concepts by the *same* `ConceptNormalizer` the flat
+    mention list uses — so a triple endpoint and a `references` mention of the same
+    thing collapse onto one Concept. A triple whose endpoints normalize to the same
+    Concept is dropped (a Concept never relates to itself).
+    """
+    for triple in triples:
+        src_id = normalizer.resolve(triple.subject)
+        dst_id = normalizer.resolve(triple.object)
+        touched.add(src_id)
+        touched.add(dst_id)
+        if src_id == dst_id:
+            logger.info("dropping self-relation on concept %s", src_id)
+            continue
+        repo.add_concept_relation(src_id, triple.predicate, dst_id, claim_id=claim_id)
 
 
 def _demoted_text(protocol: ExtractedProtocol) -> str:

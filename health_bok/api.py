@@ -31,6 +31,7 @@ from . import backfill, config, creators, curation, impacts, llm, personal, quer
 from .adapters.answerer import ChatQueryAnswerer
 from .adapters.concept_proposer import ChatConceptProposer
 from .adapters.embedder import OpenAIEmbedder
+from .adapters.hierarchy_proposer import ChatHierarchyProposer
 from .adapters.stance import ChatStanceJudge
 from .adapters.youtube import YouTubeContentSource
 from .concepts import ConceptNormalizer
@@ -114,6 +115,15 @@ def _detect_anchor_impacts(repo: Repository, anchor_type: str, anchor_id: int) -
     failing the write. Scans the existing Body of Knowledge for evidence bearing on
     the new anchor and raises Impacts where the judge sees genuine change.
     """
+    # Scope-widening first (ADR-0013): one summary Impact for the relationships
+    # already sitting under each Concept the new anchor tracks, so widening interest
+    # never detonates a burst. Structural and deterministic — no LLM.
+    try:
+        impacts.detect_scope_widening(anchor_type, anchor_id, repo=repo)
+    except Exception as exc:
+        repo.rollback()
+        logger.warning("scope-widening detection failed for %s %s: %s",
+                       anchor_type, anchor_id, exc)
     try:
         impacts.detect_for_new_anchor(
             anchor_type,
@@ -501,9 +511,14 @@ def edit_claim(claim_id: int, body: ClaimEdit) -> dict:
 
 @app.delete("/api/claims/{claim_id}")
 def delete_claim(claim_id: int) -> dict:
-    """Delete a Claim and the edges hanging off it (issue #14)."""
+    """Delete a Claim and the edges hanging off it (issue #14).
+
+    Self-healing made audible (ADR-0013): if the Claim was the last evidence behind
+    a lateral relationship a Decision relied on, an `eroded` Impact is raised so the
+    vanishing basis is surfaced rather than silently dropped.
+    """
     with _repo() as repo:
-        deleted = curation.delete_claim(claim_id, repo=repo)
+        deleted, _ = impacts.delete_claim_with_alerts(claim_id, repo=repo)
     if not deleted:
         raise HTTPException(status_code=404, detail="claim not found")
     return {"id": claim_id, "deleted": True}
@@ -572,6 +587,131 @@ def concept_detail(concept_id: int) -> dict:
     if concept is None:
         raise HTTPException(status_code=404, detail="concept not found")
     return _concept_dict(concept)
+
+
+# == Concept↔Concept relationships & the broader-of taxonomy (ADR-0013) ======
+#
+# Lateral relationships are a materialized projection of Claims (derived at admit
+# time, self-healing). The neighbourhood view rolls a Concept's whole subtree up,
+# ranked by Strength and flagged when contested. Hierarchy is the one curated link:
+# the system proposes broader parents (LLM over the embedding cluster) and the owner
+# confirms — a proposal stays invisible to roll-up until then.
+
+
+class NewBroaderOf(BaseModel):
+    """A proposed `broader-of` edge: the broader Concept this one rolls up under."""
+
+    broader_id: int
+
+
+class TrustTier(BaseModel):
+    """An owner-set trust-tier on a Creator (>=1), weighting it in Strength."""
+
+    tier: int
+
+
+@app.get("/api/concepts/{concept_id}/neighbourhood")
+def concept_neighbourhood(concept_id: int) -> dict:
+    """A Concept's roll-up neighbourhood: sub-Concepts + subtree relationships (ADR-0013).
+
+    Every lateral relationship in the Concept's confirmed `broader-of` subtree,
+    attributed to the descendant it lives on, deduped across DAG diamonds, ranked by
+    evidence Strength, and flagged when the pair is contested.
+    """
+    with _repo() as repo:
+        hood = repo.concept_neighbourhood(concept_id)
+    if hood is None:
+        raise HTTPException(status_code=404, detail="concept not found")
+    return _neighbourhood_dict(hood)
+
+
+@app.get("/api/concepts/{concept_id}/broader-of/suggestions")
+def suggest_broader_of(concept_id: int) -> dict:
+    """Broader Concepts this one could roll up under, for one-click confirm (ADR-0013)."""
+    model = config.embedding_model()
+    with _repo() as repo:
+        suggestions = curation.suggest_broader_of(
+            concept_id,
+            proposer=ChatHierarchyProposer(
+                llm.chat_model(config.hierarchy_proposal_model())
+            ),
+            embedder=OpenAIEmbedder(config.openai_api_key(), model),
+            repo=repo,
+            model=model,
+        )
+    return {"suggestions": [{"id": c.id, "name": c.name} for c in suggestions]}
+
+
+@app.post("/api/concepts/{narrower_id}/broader-of")
+def propose_broader_of(narrower_id: int, body: NewBroaderOf) -> dict:
+    """Propose a `broader-of` edge — a suggestion, invisible to roll-up until confirmed."""
+    with _repo() as repo:
+        try:
+            ok = curation.propose_broader_of(body.broader_id, narrower_id, repo=repo)
+        except psycopg.errors.RaiseException as exc:  # cycle guard
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+    if not ok:
+        raise HTTPException(status_code=404, detail="concept not found")
+    return {"broader_id": body.broader_id, "narrower_id": narrower_id, "confirmed": False}
+
+
+@app.post("/api/concepts/{narrower_id}/broader-of/{broader_id}/confirm")
+def confirm_broader_of(narrower_id: int, broader_id: int) -> dict:
+    """Confirm a proposed `broader-of` edge, making it visible to roll-up (ADR-0013)."""
+    with _repo() as repo:
+        ok = curation.confirm_broader_of(broader_id, narrower_id, repo=repo)
+    if not ok:
+        raise HTTPException(status_code=404, detail="no such proposed edge")
+    return {"broader_id": broader_id, "narrower_id": narrower_id, "confirmed": True}
+
+
+@app.delete("/api/concepts/{narrower_id}/broader-of/{broader_id}")
+def reject_broader_of(narrower_id: int, broader_id: int) -> dict:
+    """Reject (delete) a proposed-or-confirmed `broader-of` edge (ADR-0013)."""
+    with _repo() as repo:
+        ok = curation.reject_broader_of(broader_id, narrower_id, repo=repo)
+    if not ok:
+        raise HTTPException(status_code=404, detail="no such edge")
+    return {"broader_id": broader_id, "narrower_id": narrower_id, "deleted": True}
+
+
+@app.put("/api/creators/{creator_id}/trust-tier")
+def set_creator_trust_tier(creator_id: int, body: TrustTier) -> dict:
+    """Set the owner's trust-tier on a Creator (ADR-0013 "Strength")."""
+    if body.tier < 1:
+        raise HTTPException(status_code=422, detail="trust tier must be >= 1")
+    with _repo() as repo:
+        ok = repo.set_creator_trust_tier(creator_id, body.tier)
+        if ok:
+            repo.commit()
+    if not ok:
+        raise HTTPException(status_code=404, detail="creator not found")
+    return {"creator_id": creator_id, "trust_tier": body.tier}
+
+
+def _neighbour_relation_dict(r) -> dict:
+    return {
+        "relation_id": r.relation_id,
+        "src": {"id": r.src_concept_id, "name": r.src_name},
+        "predicate": r.predicate,
+        "dst": {"id": r.dst_concept_id, "name": r.dst_name},
+        "strength": round(r.strength, 4),
+        "creator_count": r.creator_count,
+        "contested": r.contested,
+        "via": (
+            {"id": r.via_concept_id, "name": r.via_concept_name}
+            if r.via_concept_id is not None else None
+        ),
+        "evidence_claim_ids": r.evidence_claim_ids,
+    }
+
+
+def _neighbourhood_dict(hood) -> dict:
+    return {
+        "concept": {"id": hood.concept_id, "name": hood.concept_name},
+        "sub_concepts": [{"id": c.id, "name": c.name} for c in hood.sub_concepts],
+        "relations": [_neighbour_relation_dict(r) for r in hood.relations],
+    }
 
 
 # == Personal layer: Goals, Markers, Decisions & linking (issue #16) ========
@@ -1069,6 +1209,7 @@ def _impact_dict(i: Impact) -> dict:
         "anchor": {"type": i.anchor_type, "id": i.anchor_id, "label": i.anchor_label},
         "stance": i.stance,
         "state": i.state,
+        "tier": i.tier,
         "detail": i.detail,
         "actioned_decision_id": i.actioned_decision_id,
         "created_at": i.created_at.isoformat(),
@@ -1095,6 +1236,18 @@ def list_impacts(
             state=state,
             repo=repo,
         )
+    return {"impacts": [_impact_dict(i) for i in found]}
+
+
+@app.get("/api/impacts/feed")
+def impacts_feed(stance: str | None = None) -> dict:
+    """The quieter Tier-2 browsable feed of notable structural changes (ADR-0013).
+
+    Field-wide relationship developments that touch no tracked anchor but cleared the
+    Strength threshold — available on demand, deliberately not in the push inbox.
+    """
+    with _repo() as repo:
+        found = impacts.tier2_feed(stance=stance, repo=repo)
     return {"impacts": [_impact_dict(i) for i in found]}
 
 

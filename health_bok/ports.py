@@ -235,6 +235,31 @@ class ConceptProposer(Protocol):
 
 
 @runtime_checkable
+class HierarchyProposer(Protocol):
+    """Proposes broader `broader-of` parents for a Concept, for owner-curated roll-up
+    (ADR-0013).
+
+    The LLM half of the hierarchy assist (mirroring `ConceptProposer`): given a
+    Concept's name and a short list of *nearby existing Concepts* (the embedding-
+    cluster the caller supplies over pgvector), return which of those are genuinely
+    *broader* — the Concepts this one should roll up under ("Brain" for "Brain
+    metabolism"). It proposes only from the nearby set, so a proposal always names a
+    Concept that already exists; the caller filters out self, existing parents, and
+    any that would close a cycle, and the owner confirms before roll-up sees the
+    edge (ADR-0004, user story 19). The model never confirms a parent.
+
+    The Claude API in production; behind its own port so the suggester is driven in
+    tests with a fake over a *real* Postgres catalogue (PRD #1 testing decisions),
+    and so a model failure degrades to "no suggestions" without breaking the page.
+    """
+
+    def propose(self, concept_name: str, nearby: list[str]) -> list[str]:
+        """Return the broader parents for `concept_name`, drawn from `nearby` — short
+        canonical Concept names, no prose. An empty list is valid (no clear parent)."""
+        ...
+
+
+@runtime_checkable
 class StanceJudge(Protocol):
     """Judges the Stance of one knowledge↔anchor pair for change detection (issue #18).
 
