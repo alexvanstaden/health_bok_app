@@ -51,6 +51,19 @@ boundary. In it you:
   deep-link back into the source. Every admitted Claim and Protocol can be edited or deleted
   in place; an edit is marked a **protected version** so a later re-extraction won't clobber
   your correction.
+- **See how Concepts connect.** Concepts link to *each other* two ways (ADR-0013). **Lateral
+  relationships** are directed, typed, claim-grounded links ("APOE4 `risk_factor_for`
+  Alzheimer's") — *derived automatically* from your Claims' predicate triples, with no edge to
+  draw by hand: admit a connecting Claim and the relationship appears; delete its last
+  evidencing Claim and it self-heals away. A small signed predicate vocabulary makes the graph
+  legible, and **contradiction is derived** (an opposite predicate, or a `no_effect_on`
+  debunking, on the same pair is flagged contested rather than merged). A **broader-of
+  taxonomy** is the one link you curate: the system *proposes* broader parents (an LLM over the
+  embedding cluster) and you confirm — a proposal stays invisible to roll-up until you do, and a
+  cycle guard keeps it a DAG. Selecting a Concept shows its **neighbourhood**: its sub-Concepts
+  plus every relationship in its whole subtree, attributed to where it lives, deduped, and
+  **ranked by Strength** (distinct creators × your per-Creator trust-tier × recency-decay, so
+  one prolific channel can't manufacture false consensus).
 - **Manage Creators & backfill.** Add a Creator by @handle or channel URL (resolved once to
   a stable channel_id), see its resolved name, pull in its recent back-catalogue as
   metadata-only Candidates, or remove it. Bulk-reject obvious noise; approving a backfill
@@ -74,10 +87,15 @@ boundary. In it you:
   video) and **abstains honestly** when nothing in your library covers the question.
 - **Triage the Impacts inbox.** When new evidence bears on your choices — or a new choice
   meets the existing library — a stance-typed **Impact** (*reinforces · contradicts ·
-  refines · opportunity*) is raised against the relevant Decision, Goal, or Marker. Filter
-  by stance and anchor; review, dismiss (or bulk-dismiss a burst), or **action** one —
-  actioning records the Decision you revise or create in response. A resolved Impact never
-  re-nags.
+  refines · opportunity · new_link · eroded*) is raised against the relevant Decision, Goal,
+  or Marker. Filter by stance and anchor; review, dismiss (or bulk-dismiss a burst), or
+  **action** one — actioning records the Decision you revise or create in response. A resolved
+  Impact never re-nags. The inbox is now **relationship-aware** (ADR-0013): a new or
+  newly-contested relationship touching a Concept your Goals/Decisions track — *or anything in
+  that Concept's subtree* — pushes a **Tier-1** alert (`new_link`/`contradicts`); a
+  relationship a Decision relied on losing its last evidence pushes `eroded`; widening your
+  scope raises a single *summary* Impact, not a burst; and other notable structural changes go
+  to a quieter **Tier-2** browsable feed gated by Strength, not the inbox.
 - **See the Logs.** A read-only record of every video Source that reached a terminal
   admission, newest-first — each with its title, its Creator, the date it was added, a snippet
   of its latest Summary, and a **BoK-state** badge (*admitted · failed*) distinguishing what
@@ -113,15 +131,23 @@ while Postgres stays real:
 | `QueryAnswerer` | `answerer.py`                         | LLM (via `ChatModel`) — retrieved evidence → a grounded, cited answer or an abstention |
 | `StanceJudge`   | `stance.py`                           | LLM (via `ChatModel`) — one knowledge↔anchor pair → a Stance for change detection |
 | `ConceptProposer` | `concept_proposer.py`               | LLM (via `ChatModel`) — a Goal's title + detail → candidate new-Concept terms (owner-confirmed before minting) |
+| `HierarchyProposer` | `hierarchy_proposer.py`             | LLM (via `ChatModel`) — a Concept + its embedding cluster → which nearby Concepts are *broader* (owner-confirmed before roll-up) |
+
+The `Extractor`'s `Extraction` also now carries, per Claim, directed **(subject, predicate,
+object) Concept triples** (ADR-0013) — the claim-grounded evidence the lateral relationships
+are derived from.
 
 ```
 health_bok/
 ├── config.py        env-var configuration (no secrets in code)
 ├── models.py        domain types (Transcript, Provenance, Summary, Digest; Extraction/Claim/Protocol; query + Impact port types)
-├── ports.py         the eight port protocols
+├── ports.py         the nine port protocols
 ├── db.py            Postgres connection + schema bootstrap
 ├── schema.sql       creators/candidates/videos/transcripts/summaries/processing_state
 │                    + concepts/claims/protocols/edges/embeddings/jobs/admissions/goals/markers/decisions/impacts
+│                    + concept_relations (+evidence) and the broader-of edge kind (ADR-0013)
+├── predicates.py    the lateral-relationship predicate vocabulary + derived contradiction
+├── strength.py      relationship Strength: distinct creators × trust-tier × recency-decay
 ├── repository.py    persistence over the one Postgres
 ├── creators.py      Creator-management service (add / remove the watch list)
 ├── backfill.py      backfill Candidate population: list back-catalogue → metadata-only Candidates
@@ -133,8 +159,8 @@ health_bok/
 ├── curation.py      in-place edit/delete of admitted Claims & Protocols; edit-protection
 ├── personal.py      record Goals/Markers/Decisions & suggest-then-confirm linking
 ├── query.py         grounded NL query: retrieve → answer → ground (cite-or-abstain)
-├── impacts.py       the Impact engine: forward/reverse/supersede detection + inbox lifecycle
-├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle + forward Impact pass
+├── impacts.py       the Impact engine: forward/reverse/supersede + relationship (Tier-1/Tier-2) detection + inbox lifecycle
+├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle + forward Impact + relationship pass
 ├── api.py           FastAPI HTTP API the Web App calls: review · BoK · personal · query · Impacts
 ├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `creators …`
 └── adapters/        youtube · whisper · claude · resend · extractor · embedder · answerer · stance
@@ -180,6 +206,7 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `STANCE_MODEL`             | Model for the Impact StanceJudge (default: the provider's default chat model) |
 | `IMPACT_CANDIDATE_LIMIT`   | Per-category cap on candidates a detection pass judges (default `25`) |
 | `CONCEPT_PROPOSAL_MODEL`   | Model for proposing new Concepts for a Goal (default: the provider's default chat model) |
+| `HIERARCHY_PROPOSAL_MODEL` | Model for proposing broader-of taxonomy parents (default: the provider's default chat model) |
 
 ## Run the pipeline
 
