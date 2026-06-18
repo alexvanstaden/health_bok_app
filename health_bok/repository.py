@@ -1293,6 +1293,25 @@ class Repository:
             )
             return cur.fetchone()[0]
 
+    def claim_ids_for_video(
+        self, video_id: str, *, include_protected: bool = True
+    ) -> list[int]:
+        """A video's Claim ids — the transcript span re-extraction supersedes (ADR-0005).
+
+        Re-extraction versions Claims *within one transcript span* (the video),
+        replacing the prior ones with a fresh extraction. A *protected* (owner-edited)
+        Claim is a hand-corrected version a supersede pass must never clobber
+        (ADR-0010), so `include_protected=False` excludes it from the span being
+        superseded. Ordered for deterministic supersede.
+        """
+        sql = "SELECT id FROM claims WHERE video_id = %s"
+        if not include_protected:
+            sql += " AND NOT protected"
+        sql += " ORDER BY id"
+        with self._conn.cursor() as cur:
+            cur.execute(sql, (video_id,))
+            return [r[0] for r in cur.fetchall()]
+
     def add_protocol(
         self,
         video_id: str,

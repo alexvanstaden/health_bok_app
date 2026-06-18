@@ -131,6 +131,97 @@ def admit_candidate(
     )
 
 
+@dataclass(frozen=True)
+class SupersessionResult:
+    """What a re-extraction supersede produced — for logging and test assertions."""
+
+    video_id: str
+    claims_superseded: int
+    claims_admitted: int
+    relations_removed: int
+
+
+def supersede_claims(
+    video_id: str,
+    *,
+    extractor: Extractor,
+    normalizer: ConceptNormalizer,
+    repo: Repository,
+) -> SupersessionResult:
+    """Re-extract a video's transcript span and supersede its prior Claims (ADR-0005).
+
+    Re-extraction versions Claims *within a single transcript span* — the video,
+    which is not the cross-source merging ADR-0002 forbids. Lateral relationships are
+    a *materialized projection* of those Claims (ADR-0013), so they self-heal in
+    lock-step rather than drift:
+
+      1. the fresh extraction's Claims are admitted, their triples re-deriving the
+         relationships — an evidence link onto a surviving relationship is therefore
+         **re-pointed** to the superseding Claim before the old one is dropped;
+      2. the prior (non-protected) Claims are deleted, cascading their evidence away,
+         and any relationship left with **no** evidencing Claim is **removed entirely**
+         (`delete_claim` self-heals it); a relationship still asserted by a surviving
+         Claim keeps standing, only the stale evidence link gone.
+
+    Owner-**protected** Claims are hand-corrected versions a supersede never clobbers
+    (ADR-0010), so they are left standing, evidence and all. Idempotent: re-running the
+    same extraction re-asserts the same relationships and leaves no orphaned evidence
+    links (ADR-0005). Like `admit_candidate` it does not commit — the worker owns the
+    transaction, so a mid-supersede failure rolls the whole pass back.
+    """
+    transcript = repo.load_fetched_transcript(video_id)
+    if transcript is None:
+        raise AdmissionError(
+            f"cannot re-extract {video_id!r}: no archived Transcript (ADR-0001)"
+        )
+
+    prior_claim_ids = repo.claim_ids_for_video(video_id, include_protected=False)
+    # The relationships the prior span evidenced, captured *before* any change: after
+    # the new Claims re-derive and the old Claims are dropped, the ones that did not
+    # survive are exactly those whose last evidence the supersede removed (ADR-0013).
+    prior_relations: set[int] = set()
+    for claim_id in prior_claim_ids:
+        prior_relations.update(repo.relations_evidenced_by(claim_id))
+
+    extraction = extractor.extract(transcript)
+    concepts_touched: set[int] = set()
+    claims_admitted = 0
+    for claim in extraction.claims:
+        if not claim.is_grounded:  # grounded-or-dropped (ADR-0010)
+            logger.info("dropping ungroundable claim: %.60s", claim.text)
+            continue
+        claim_id = repo.add_claim(
+            video_id,
+            text=claim.text,
+            type=claim.type,
+            locator_seconds=claim.locator_seconds,
+        )
+        _link_concepts(
+            "claim", claim_id, claim.concepts, normalizer, repo, concepts_touched
+        )
+        _derive_relations(claim_id, claim.triples, normalizer, repo, concepts_touched)
+        claims_admitted += 1
+
+    # Drop the superseded Claims; `delete_claim` cascades each one's evidence links
+    # and prunes any relationship thereby left unevidenced (the self-heal).
+    for claim_id in prior_claim_ids:
+        repo.delete_claim(claim_id)
+    relations_removed = len(
+        prior_relations - repo.existing_relation_ids(list(prior_relations))
+    )
+
+    logger.info(
+        "superseded %s: %d prior claim(s) -> %d new claim(s), %d relation(s) removed",
+        video_id, len(prior_claim_ids), claims_admitted, relations_removed,
+    )
+    return SupersessionResult(
+        video_id=video_id,
+        claims_superseded=len(prior_claim_ids),
+        claims_admitted=claims_admitted,
+        relations_removed=relations_removed,
+    )
+
+
 def _link_concepts(
     src_type: str,
     src_id: int,

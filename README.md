@@ -54,8 +54,10 @@ boundary. In it you:
 - **See how Concepts connect.** Concepts link to *each other* two ways (ADR-0013). **Lateral
   relationships** are directed, typed, claim-grounded links ("APOE4 `risk_factor_for`
   Alzheimer's") — *derived automatically* from your Claims' predicate triples, with no edge to
-  draw by hand: admit a connecting Claim and the relationship appears; delete its last
-  evidencing Claim and it self-heals away. A small signed predicate vocabulary makes the graph
+  draw by hand: admit a connecting Claim and the relationship appears; delete — or
+  re-extract — its last evidencing Claim and it self-heals away (a re-extraction re-points
+  the evidence to the superseding Claim, or drops the relationship if the new Claims no longer
+  assert it, while a relationship another Claim still backs survives). A small signed predicate vocabulary makes the graph
   legible, and **contradiction is derived** (an opposite predicate, or a `no_effect_on`
   debunking, on the same pair is flagged contested rather than merged). A **broader-of
   taxonomy** is the one link you curate: the system *proposes* broader parents (an LLM over the
