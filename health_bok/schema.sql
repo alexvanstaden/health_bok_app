@@ -496,3 +496,53 @@ CREATE TABLE IF NOT EXISTS concept_relation_evidence (
 );
 CREATE INDEX IF NOT EXISTS relation_evidence_by_claim
     ON concept_relation_evidence (claim_id);
+
+-- Hierarchy: `broader-of` is a structural, low-cardinality Concept→Concept edge, so
+-- it lives in the polymorphic `edges` table as one new `kind` (ADR-0013 amends
+-- ADR-0008) — unlike the volatile lateral predicate set, which got its own table.
+-- An edge `broader --broader-of--> narrower` is owner-curated taxonomy: it carries
+-- `props.confirmed` ('false' = a proposed suggestion, invisible to roll-up;
+-- 'true' = the owner confirmed it). Idempotent migration for a database created
+-- before ADR-0013 (the inline CHECK above reserved only the five original kinds).
+ALTER TABLE edges DROP CONSTRAINT IF EXISTS edges_kind_check;
+ALTER TABLE edges ADD CONSTRAINT edges_kind_check
+    CHECK (kind IN ('references', 'supports', 'implements', 'serves',
+                    'motivated_by', 'broader-of'));
+
+-- Cycle guard: `broader-of` forms a DAG (multi-parent but acyclic), so roll-up and
+-- subtree traversal always terminate (user story 17). This BEFORE trigger rejects
+-- any `broader-of` edge that would close a loop — a self-loop, or an edge whose
+-- narrower endpoint can already reach the broader one by following `broader-of`
+-- (in the spirit of ADR-0008's edge-integrity trigger). It considers all
+-- `broader-of` edges (proposed or confirmed), so confirming a proposal can never
+-- introduce a cycle either.
+CREATE OR REPLACE FUNCTION edges_broader_of_acyclic()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.kind <> 'broader-of' THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.src_id = NEW.dst_id THEN
+        RAISE EXCEPTION 'broader-of: a Concept cannot be broader of itself (%)', NEW.src_id;
+    END IF;
+    IF EXISTS (
+        WITH RECURSIVE reach(id) AS (
+            SELECT NEW.dst_id
+          UNION
+            SELECT e.dst_id FROM edges e JOIN reach r ON e.src_id = r.id
+            WHERE e.kind = 'broader-of'
+              AND e.src_type = 'concept' AND e.dst_type = 'concept'
+        )
+        SELECT 1 FROM reach WHERE id = NEW.src_id
+    ) THEN
+        RAISE EXCEPTION 'broader-of: edge % -> % would create a hierarchy cycle',
+            NEW.src_id, NEW.dst_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS edges_broader_of_no_cycle ON edges;
+CREATE TRIGGER edges_broader_of_no_cycle
+    BEFORE INSERT OR UPDATE ON edges
+    FOR EACH ROW EXECUTE FUNCTION edges_broader_of_acyclic();

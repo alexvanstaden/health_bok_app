@@ -1620,6 +1620,83 @@ class Repository:
             )
             return cur.rowcount > 0
 
+    # -- Hierarchy: the owner-curated `broader-of` taxonomy (ADR-0013) ----------
+    #
+    # `broader --broader-of--> narrower` edges, proposed (props.confirmed='false',
+    # invisible to roll-up) until the owner confirms (props.confirmed='true'). The
+    # DB cycle-guard trigger keeps the graph a DAG, so a proposal that would close a
+    # loop raises rather than persisting.
+
+    def propose_broader_of(self, broader_id: int, narrower_id: int) -> None:
+        """Record a *proposed* `broader-of` edge — a suggestion, invisible to roll-up.
+
+        Idempotent: re-proposing the same pair leaves the existing edge (and its
+        confirmation state) untouched. The cycle-guard trigger rejects a proposal
+        that would close a loop.
+        """
+        self.add_edge(
+            "concept", broader_id, "concept", narrower_id, "broader-of",
+            props={"confirmed": False},
+        )
+
+    def confirm_broader_of(self, broader_id: int, narrower_id: int) -> bool:
+        """Confirm a proposed `broader-of` edge, making it visible to roll-up.
+
+        Flips `props.confirmed` to true; the UPDATE re-checks the cycle guard, so a
+        confirmation can never introduce a cycle. Returns whether the edge existed.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE edges SET props = jsonb_set(props, '{confirmed}', 'true') "
+                "WHERE kind = 'broader-of' AND src_type = 'concept' AND src_id = %s "
+                "AND dst_type = 'concept' AND dst_id = %s",
+                (broader_id, narrower_id),
+            )
+            return cur.rowcount > 0
+
+    def reject_broader_of(self, broader_id: int, narrower_id: int) -> bool:
+        """Reject (delete) a proposed-or-confirmed `broader-of` edge. ``False`` if absent."""
+        return self.remove_edge(
+            "concept", broader_id, "concept", narrower_id, "broader-of"
+        )
+
+    def broader_parents(
+        self, concept_id: int, *, confirmed_only: bool = False
+    ) -> list[ConceptRef]:
+        """The Concept's `broader-of` parents (its broader Concepts), ADR-0013.
+
+        With `confirmed_only`, only confirmed parents — what roll-up actually
+        traverses; otherwise proposed parents are included too (the curation view).
+        """
+        clause = ""
+        if confirmed_only:
+            clause = " AND COALESCE(e.props->>'confirmed', 'false') = 'true'"
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.id, c.name FROM edges e JOIN concepts c ON c.id = e.src_id "
+                "WHERE e.kind = 'broader-of' AND e.dst_type = 'concept' "
+                "AND e.dst_id = %s AND e.src_type = 'concept'" + clause + " "
+                "ORDER BY c.name",
+                (concept_id,),
+            )
+            return [ConceptRef(id=r[0], name=r[1]) for r in cur.fetchall()]
+
+    def list_broader_of(self, *, confirmed: bool | None = None) -> list[tuple]:
+        """Every `broader-of` edge as (broader_id, narrower_id, confirmed) — for the
+        curation view and tests. `confirmed` filters to confirmed/proposed when set."""
+        clause = ""
+        if confirmed is not None:
+            want = "true" if confirmed else "false"
+            clause = f" AND COALESCE(props->>'confirmed', 'false') = '{want}'"
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT src_id, dst_id, "
+                "       COALESCE(props->>'confirmed', 'false') = 'true' "
+                "FROM edges WHERE kind = 'broader-of'" + clause + " "
+                "ORDER BY src_id, dst_id",
+            )
+            return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+
     def nearest_concept(
         self, embedding: list[float], *, model: str
     ) -> NearestConcept | None:
