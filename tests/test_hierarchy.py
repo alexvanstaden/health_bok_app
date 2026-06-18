@@ -132,6 +132,40 @@ def test_propose_confirm_reject_lifecycle(conn):
     assert curation.propose_broader_of(brain, 999999, repo=repo) is False
 
 
+def test_a_concept_rolls_up_under_multiple_parents(conn):
+    """The taxonomy is a DAG: a Concept can have several broader parents (issue #46).
+
+    APOE4 legitimately rolls up under genetics *and* lipid metabolism *and*
+    Alzheimer's (ADR-0013). Multi-parent create is idempotent and removing one
+    parent leaves the others intact.
+    """
+    repo = Repository(conn)
+    apoe4 = _mint(repo, "APOE4")
+    genetics = _mint(repo, "genetics")
+    lipids = _mint(repo, "lipid metabolism")
+    alzheimers = _mint(repo, "Alzheimer's")
+    repo.commit()
+
+    for parent in (genetics, lipids, alzheimers):
+        assert curation.propose_broader_of(parent, apoe4, repo=repo) is True
+        assert curation.confirm_broader_of(parent, apoe4, repo=repo) is True
+    # Re-proposing an existing parent is a no-op, not a duplicate edge (idempotent).
+    assert curation.propose_broader_of(genetics, apoe4, repo=repo) is True
+
+    parents = repo.broader_parents(apoe4, confirmed_only=True)
+    assert [p.name for p in parents] == ["Alzheimer's", "genetics", "lipid metabolism"]
+    assert repo.list_broader_of(confirmed=True) == sorted(
+        [(genetics, apoe4, True), (lipids, apoe4, True), (alzheimers, apoe4, True)]
+    )
+
+    # Removing one parent leaves the other two standing.
+    assert curation.reject_broader_of(lipids, apoe4, repo=repo) is True
+    remaining = repo.broader_parents(apoe4, confirmed_only=True)
+    assert [p.name for p in remaining] == ["Alzheimer's", "genetics"]
+    # Removing an already-removed parent is a no-op False, not a crash.
+    assert curation.reject_broader_of(lipids, apoe4, repo=repo) is False
+
+
 def test_cycle_guard_rejects_a_loop_and_a_self_loop(conn):
     repo = Repository(conn)
     a = _mint(repo, "Brain")
