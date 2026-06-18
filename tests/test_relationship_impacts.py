@@ -182,6 +182,53 @@ def test_scope_widening_raises_a_single_summary_not_a_burst(conn):
     assert "3 existing connection" in summary.detail
 
 
+def test_confirming_broader_of_widens_scope_with_a_single_summary(conn):
+    repo = Repository(conn)
+    # Two pre-existing relationships sit under "Brain metabolism", which is not yet
+    # connected to anything the owner tracks.
+    _admit_relation(repo, video_id="v1", channel_id="UC_a",
+                    subject="Brain metabolism", predicate="associated_with",
+                    obj="ketones")
+    _admit_relation(repo, video_id="v2", channel_id="UC_b",
+                    subject="omega-3", predicate="increases", obj="Brain metabolism")
+
+    # A Goal tracks the broader "Brain"; nothing is under it yet.
+    brain = repo.add_concept("Brain")
+    repo.add_embedding("concept", brain, FakeEmbedder(VECTORS).embed("Brain"),
+                       model=EMBED_MODEL)
+    repo.commit()
+    bmet = _cid(repo, "Brain metabolism")
+    _goal_tracking(repo, brain, title="brain health")
+
+    # Confirming Brain broader-of Brain metabolism pulls the subtree into scope.
+    repo.propose_broader_of(brain, bmet)
+    repo.confirm_broader_of(brain, bmet)
+    repo.commit()
+    raised = impacts.detect_scope_widening_for_broader_of(brain, bmet, repo=repo)
+
+    # Exactly one summary for the backlog now under Brain — not one per relationship.
+    assert len(raised) == 1
+    [summary] = impacts.inbox(repo=repo)
+    assert summary.stance == "new_link"
+    assert summary.anchor_type == "goal"
+    assert summary.source_type == "concept"
+    assert "2 existing connection" in summary.detail
+    assert "under Brain" in summary.detail
+
+    # Re-confirming never re-nags.
+    assert impacts.detect_scope_widening_for_broader_of(brain, bmet, repo=repo) == []
+    assert len(impacts.inbox(repo=repo)) == 1
+
+    # Only edges arriving *afterwards* push individually: a fresh relationship on the
+    # now-in-scope subtree reaches the inbox via the per-video pass.
+    _admit_relation(repo, video_id="v3", channel_id="UC_c",
+                    subject="Brain metabolism", predicate="associated_with",
+                    obj="sleep quality")
+    later = impacts.detect_relationship_impacts_for_video("v3", repo=repo, now=NOW)
+    assert len(later) == 1
+    assert len(impacts.inbox(repo=repo)) == 2
+
+
 def test_eroded_impact_when_a_tracked_relationship_loses_its_last_evidence(conn):
     repo = Repository(conn)
     _admit_relation(repo, video_id="v1", channel_id="UC_a",
