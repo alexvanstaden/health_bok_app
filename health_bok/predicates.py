@@ -27,6 +27,9 @@ one (plus the `concept_relations` CHECK in `schema.sql`).
 
 from __future__ import annotations
 
+from itertools import combinations
+from typing import Iterable
+
 # The confidence fallback: a genuine but untyped connection (ADR-0010). Signless.
 ASSOCIATED_WITH = "associated_with"
 
@@ -84,3 +87,17 @@ def contradicts(predicate_a: str, predicate_b: str) -> bool:
     if predicate_b == NO_EFFECT_ON:
         return predicate_a in SIGNED
     return _OPPOSITES.get(predicate_a) == predicate_b and predicate_b in SIGNED
+
+
+def tensions(predicates: Iterable[str]) -> list[tuple[str, str]]:
+    """The contradicting predicate pairs among `predicates` — the "tension" itself.
+
+    Given every predicate asserted on *one ordered (src, dst) pair*, return each
+    unordered combination that `contradicts` (an opposite signed pair, or
+    `no_effect_on` against any signed predicate), as a sorted, deduped tuple. An
+    empty result means the pair is concordant; a non-empty one names exactly which
+    predicates are in tension — derived, never merged (ADR-0002). Pure, so the
+    polarity logic is unit-testable without a database (ADR-0013 testing decisions).
+    """
+    distinct = sorted(set(predicates))
+    return [(a, b) for a, b in combinations(distinct, 2) if contradicts(a, b)]

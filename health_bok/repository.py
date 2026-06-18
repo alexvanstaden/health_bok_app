@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from .predicates import contradicts
+from .predicates import contradicts, tensions
 from .strength import (
     DEFAULT_HALF_LIFE_DAYS,
     EvidenceContribution,
@@ -244,6 +244,31 @@ class ConceptRelation:
     dst_concept_id: int
     dst_name: str
     evidence_claim_ids: list[int]
+
+
+@dataclass(frozen=True)
+class ContestedPair:
+    """Whether a directed Concept pair is contested, and which predicates clash (ADR-0013).
+
+    The contradiction verdict for one ordered (src, dst) pair: every distinct
+    `predicate` the owner's Claims assert between them, and the `tensions` among
+    those — the predicate pairs that disagree (an opposite signed pair, or
+    `no_effect_on` against any signed predicate). Contradiction is *derived*, never
+    merged (ADR-0002): both predicates stand as evidenced relationships and the pair
+    is simply *flagged* contested, so the disagreement stays visible (user story 13).
+    """
+
+    src_concept_id: int
+    src_name: str
+    dst_concept_id: int
+    dst_name: str
+    predicates: list[str]
+    tensions: list[tuple[str, str]]
+
+    @property
+    def contested(self) -> bool:
+        """True when at least one predicate pair on this ordered pair is in tension."""
+        return bool(self.tensions)
 
 
 @dataclass(frozen=True)
@@ -1537,6 +1562,46 @@ class Repository:
                 )
                 for r in cur.fetchall()
             ]
+
+    def contested_pair(
+        self, src_concept_id: int, dst_concept_id: int
+    ) -> ContestedPair | None:
+        """Whether one directed Concept pair is contested, and which predicates clash.
+
+        For the ordered (src, dst) pair, collect every distinct `predicate` the
+        owner's Claims assert between them and derive the `tensions` among them
+        (ADR-0013): an opposite signed pair, or `no_effect_on` against any signed
+        predicate. Returns ``None`` when no relationship links the pair in that
+        direction — there is nothing to contest. The verdict is *derived* from the
+        materialized relationships, never a merge (ADR-0002): both predicates remain
+        evidenced, the pair is merely flagged.
+
+        Directed to match the contradiction rule itself, which is defined on the
+        *same ordered pair* — "src protects_against dst" and "dst risk_factor_for
+        src" are different claims about different directions, not a disagreement.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT src.name, dst.name, array_agg(DISTINCT cr.predicate) "
+                "FROM concept_relations cr "
+                "JOIN concepts src ON src.id = cr.src_concept_id "
+                "JOIN concepts dst ON dst.id = cr.dst_concept_id "
+                "WHERE cr.src_concept_id = %s AND cr.dst_concept_id = %s "
+                "GROUP BY src.name, dst.name",
+                (src_concept_id, dst_concept_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        predicates = sorted(row[2])
+        return ContestedPair(
+            src_concept_id=src_concept_id,
+            src_name=row[0],
+            dst_concept_id=dst_concept_id,
+            dst_name=row[1],
+            predicates=predicates,
+            tensions=tensions(predicates),
+        )
 
     def descendant_concept_ids(self, concept_id: int) -> list[int]:
         """A Concept and every Concept under it in the confirmed `broader-of` DAG.

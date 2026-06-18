@@ -8,7 +8,7 @@ database).
 
 from __future__ import annotations
 
-from health_bok.predicates import contradicts, normalize_predicate
+from health_bok.predicates import contradicts, normalize_predicate, tensions
 
 
 def test_opposite_signed_pairs_contradict():
@@ -45,3 +45,27 @@ def test_normalize_predicate_falls_back_precision_first():
     assert normalize_predicate("totally made up") == "associated_with"
     assert normalize_predicate(None) == "associated_with"
     assert normalize_predicate("") == "associated_with"
+
+
+def test_tensions_names_an_opposing_signed_pair():
+    # "Which predicates are in tension" — the contested pair, once, sorted.
+    assert tensions(["protects_against", "risk_factor_for"]) == [
+        ("protects_against", "risk_factor_for")
+    ]
+
+
+def test_tensions_includes_no_effect_against_every_signed_predicate():
+    # The debunking case surfaces against both poles, plus the poles against each other.
+    result = tensions(["treats", "worsens", "no_effect_on"])
+    assert ("no_effect_on", "treats") in result
+    assert ("no_effect_on", "worsens") in result
+    assert ("treats", "worsens") in result
+    assert len(result) == 3
+
+
+def test_tensions_empty_for_concordant_or_signless_predicates():
+    # Agreement, a lone predicate, and valence-free types are never in tension.
+    assert tensions(["risk_factor_for", "risk_factor_for"]) == []
+    assert tensions(["increases"]) == []
+    assert tensions(["biomarker_of", "measured_by", "mechanism_of"]) == []
+    assert tensions([]) == []
