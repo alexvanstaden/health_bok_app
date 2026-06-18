@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg
 
+from .predicates import contradicts
+from .strength import (
+    DEFAULT_HALF_LIFE_DAYS,
+    EvidenceContribution,
+    distinct_creator_count,
+    relation_strength,
+)
 from .models import (
     CandidateMetadata,
     CreatorIdentity,
@@ -237,6 +244,70 @@ class ConceptRelation:
     dst_concept_id: int
     dst_name: str
     evidence_claim_ids: list[int]
+
+
+@dataclass(frozen=True)
+class NeighbourRelation:
+    """One lateral relationship in a Concept's neighbourhood, ranked & attributed (ADR-0013).
+
+    Carries the directed link, its evidence Strength and distinct-creator count
+    (what ranks it), whether the pair is `contested` (an opposite or `no_effect_on`
+    predicate also holds on the same ordered pair), and — once hierarchy roll-up
+    lands (slice 3) — `via_*`, the descendant Concept the relationship actually
+    lives on when surfaced at a broader ancestor ("via Brain metabolism").
+    """
+
+    relation_id: int
+    src_concept_id: int
+    src_name: str
+    predicate: str
+    dst_concept_id: int
+    dst_name: str
+    strength: float
+    creator_count: int
+    contested: bool
+    evidence_claim_ids: list[int]
+    via_concept_id: int | None = None
+    via_concept_name: str | None = None
+
+
+@dataclass(frozen=True)
+class Neighbourhood:
+    """A Concept's neighbourhood: its sub-Concepts and every relationship around it.
+
+    The roll-up view (ADR-0013): the selected Concept, its sub-Concepts (the
+    `broader-of` children, slice 3), and the lateral relationships in its subtree —
+    deduped across DAG diamonds, attributed to the descendant they came from, and
+    ranked by Strength so the best-supported connections surface first.
+    """
+
+    concept_id: int
+    concept_name: str
+    sub_concepts: list[ConceptRef]
+    relations: list[NeighbourRelation]
+
+
+def _attribution(
+    anchor_id: int,
+    subtree: set[int],
+    src_id: int,
+    src_name: str,
+    dst_id: int,
+    dst_name: str,
+) -> dict:
+    """Where a relationship surfaced at the anchor actually lives (ADR-0013).
+
+    A relationship touching the anchor directly is shown unattributed (`via` None);
+    one that only touches a *descendant* (rolled up under a broader ancestor) is
+    attributed to that descendant ("via Brain metabolism"), so the owner knows
+    where the connection lives. Prefers the `src` endpoint when both ends are
+    descendants.
+    """
+    if src_id == anchor_id or dst_id == anchor_id:
+        return {"via_concept_id": None, "via_concept_name": None}
+    if src_id in subtree:
+        return {"via_concept_id": src_id, "via_concept_name": src_name}
+    return {"via_concept_id": dst_id, "via_concept_name": dst_name}
 
 
 def _vector_literal(embedding: list[float]) -> str:
@@ -1383,6 +1454,171 @@ class Repository:
                 )
                 for r in cur.fetchall()
             ]
+
+    def descendant_concept_ids(self, concept_id: int) -> list[int]:
+        """A Concept and every Concept under it in the confirmed `broader-of` DAG.
+
+        The subtree the roll-up neighbourhood spans (ADR-0013): the anchor plus all
+        narrower Concepts reachable by following *confirmed* `broader-of` edges
+        (`broader --broader-of--> narrower`). A proposed-but-unconfirmed edge is
+        invisible here, so an unconfirmed parent never silently pulls a subtree into
+        view (user story 19). The recursive walk is cycle-safe by construction (the
+        edge cycle-guard forbids loops) and deduped, so a Concept reachable by two
+        paths through a DAG diamond appears once. Until hierarchy lands (slice 3)
+        no `broader-of` edge exists and this is just `[concept_id]`.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "WITH RECURSIVE subtree(id) AS ("
+                "    SELECT %s::bigint "
+                "  UNION "
+                "    SELECT e.dst_id FROM edges e JOIN subtree s ON e.src_id = s.id "
+                "    WHERE e.kind = 'broader-of' AND e.src_type = 'concept' "
+                "      AND e.dst_type = 'concept' "
+                "      AND COALESCE(e.props->>'confirmed', 'false') = 'true' "
+                ") SELECT id FROM subtree",
+                (concept_id,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def concept_neighbourhood(
+        self,
+        concept_id: int,
+        *,
+        half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+        now: datetime | None = None,
+    ) -> Neighbourhood | None:
+        """The roll-up neighbourhood of a Concept (ADR-0013): sub-Concepts + relationships.
+
+        Returns the selected Concept's sub-Concepts and every lateral relationship
+        in its whole `broader-of` subtree — surfaced at the selected Concept,
+        attributed to the descendant it came from (`via_*`), deduped across DAG
+        diamonds, and ranked by evidence Strength (distinct creators × trust-tier ×
+        recency). A relationship is flagged `contested` when an opposite or
+        `no_effect_on` predicate also holds on the same ordered pair. ``None`` if
+        the Concept does not exist.
+        """
+        now = now or datetime.now(timezone.utc)
+        name = self._concept_name(concept_id)
+        if name is None:
+            return None
+
+        subtree = self.descendant_concept_ids(concept_id)
+        relations = self._neighbour_relations(
+            concept_id, subtree, half_life_days=half_life_days, now=now
+        )
+        return Neighbourhood(
+            concept_id=concept_id,
+            concept_name=name,
+            sub_concepts=self._sub_concepts(concept_id, subtree),
+            relations=relations,
+        )
+
+    def _concept_name(self, concept_id: int) -> str | None:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT name FROM concepts WHERE id = %s", (concept_id,))
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def _sub_concepts(self, anchor_id: int, subtree: list[int]) -> list[ConceptRef]:
+        """The anchor's sub-Concepts (its confirmed `broader-of` descendants)."""
+        ids = [cid for cid in subtree if cid != anchor_id]
+        if not ids:
+            return []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, name FROM concepts WHERE id = ANY(%s) ORDER BY name",
+                (ids,),
+            )
+            return [ConceptRef(id=r[0], name=r[1]) for r in cur.fetchall()]
+
+    def _neighbour_relations(
+        self,
+        anchor_id: int,
+        subtree: list[int],
+        *,
+        half_life_days: float,
+        now: datetime,
+    ) -> list[NeighbourRelation]:
+        """Every relationship touching the subtree, with Strength, contested flag, via."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT cr.id, cr.src_concept_id, src.name, cr.predicate, "
+                "       cr.dst_concept_id, dst.name, "
+                "       cre.claim_id, v.creator_id, creators.trust_tier, v.published_at "
+                "FROM concept_relations cr "
+                "JOIN concepts src ON src.id = cr.src_concept_id "
+                "JOIN concepts dst ON dst.id = cr.dst_concept_id "
+                "JOIN concept_relation_evidence cre ON cre.relation_id = cr.id "
+                "JOIN claims cl ON cl.id = cre.claim_id "
+                "JOIN videos v ON v.video_id = cl.video_id "
+                "JOIN creators ON creators.id = v.creator_id "
+                "WHERE cr.src_concept_id = ANY(%(ids)s) OR cr.dst_concept_id = ANY(%(ids)s)",
+                {"ids": subtree},
+            )
+            rows = cur.fetchall()
+
+        subtree_set = set(subtree)
+        # Group evidence rows by relation, accumulating Strength contributions.
+        grouped: dict[int, dict] = {}
+        for r in rows:
+            rel = grouped.setdefault(
+                r[0],
+                {
+                    "src_id": r[1], "src_name": r[2], "predicate": r[3],
+                    "dst_id": r[4], "dst_name": r[5],
+                    "claim_ids": set(), "contribs": [],
+                },
+            )
+            rel["claim_ids"].add(r[6])
+            rel["contribs"].append(
+                EvidenceContribution(creator_id=r[7], trust_tier=r[8], dated=r[9])
+            )
+
+        # Contested: another predicate on the *same ordered pair* contradicts this one.
+        pair_predicates: dict[tuple[int, int], set[str]] = {}
+        for rel in grouped.values():
+            pair_predicates.setdefault((rel["src_id"], rel["dst_id"]), set()).add(
+                rel["predicate"]
+            )
+
+        result: list[NeighbourRelation] = []
+        for relation_id, rel in grouped.items():
+            others = pair_predicates[(rel["src_id"], rel["dst_id"])]
+            contested = any(contradicts(rel["predicate"], p) for p in others)
+            result.append(
+                NeighbourRelation(
+                    relation_id=relation_id,
+                    src_concept_id=rel["src_id"],
+                    src_name=rel["src_name"],
+                    predicate=rel["predicate"],
+                    dst_concept_id=rel["dst_id"],
+                    dst_name=rel["dst_name"],
+                    strength=relation_strength(
+                        rel["contribs"], now=now, half_life_days=half_life_days
+                    ),
+                    creator_count=distinct_creator_count(rel["contribs"]),
+                    contested=contested,
+                    evidence_claim_ids=sorted(rel["claim_ids"]),
+                    **_attribution(anchor_id, subtree_set, rel["src_id"],
+                                   rel["src_name"], rel["dst_id"], rel["dst_name"]),
+                )
+            )
+        # Best-supported first; relation_id as a stable tiebreak.
+        result.sort(key=lambda x: (-x.strength, x.relation_id))
+        return result
+
+    def set_creator_trust_tier(self, creator_id: int, tier: int) -> bool:
+        """Set the owner's trust-tier on a Creator (ADR-0013 "Strength").
+
+        Higher tiers weight that creator more in every relationship's Strength.
+        Returns whether the Creator existed. Does not commit.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE creators SET trust_tier = %s WHERE id = %s", (tier, creator_id)
+            )
+            return cur.rowcount > 0
 
     def nearest_concept(
         self, embedding: list[float], *, model: str
