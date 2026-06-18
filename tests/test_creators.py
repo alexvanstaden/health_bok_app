@@ -121,3 +121,37 @@ def test_list_creators_returns_oldest_first(conn):
     creators.add_creator("@peterattia", content_source=source, repo=repo)
 
     assert Repository(conn).list_creators() == [HUBERMAN, ATTIA]
+
+
+def _trust_tier(conn, channel_id: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT trust_tier FROM creators WHERE channel_id = %s", (channel_id,))
+        return cur.fetchone()[0]
+
+
+def test_new_creator_defaults_to_trust_tier_one(conn):
+    # Issue #49 AC: a Creator is untiered until the owner says otherwise, and untiered
+    # means tier 1 — so Strength degrades to a plain distinct-Creator count (ADR-0013).
+    source = _source(**{HANDLE: HUBERMAN})
+    repo = Repository(conn)
+    creators.add_creator(HANDLE, content_source=source, repo=repo)
+
+    assert _trust_tier(conn, HUBERMAN.channel_id) == 1
+
+
+def test_set_trust_tier_persists_for_a_known_creator(conn):
+    # Issue #49 AC: the owner can set a Creator's trust-tier (the "control"). The
+    # write needs a commit, mirroring how the API endpoint drives it.
+    source = _source(**{HANDLE: HUBERMAN})
+    repo = Repository(conn)
+    creators.add_creator(HANDLE, content_source=source, repo=repo)
+
+    assert repo.set_creator_trust_tier(repo.creator_id(HUBERMAN.channel_id), 4) is True
+    repo.commit()
+
+    assert _trust_tier(conn, HUBERMAN.channel_id) == 4
+
+
+def test_set_trust_tier_on_unknown_creator_returns_false(conn):
+    # The API maps this False to a 404 rather than silently no-op'ing.
+    assert Repository(conn).set_creator_trust_tier(999999, 3) is False

@@ -9,7 +9,7 @@ signless relationship is never contested.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from health_bok.admit import admit_candidate
 from health_bok.concepts import ConceptNormalizer
@@ -42,10 +42,11 @@ def _admit_relation(
     subject: str,
     predicate: str,
     obj: str,
+    published: datetime = PUBLISHED,
 ):
     seed_processed_video(
         repo, video_id=video_id, channel_id=channel_id, channel_name=channel_id,
-        published_at=PUBLISHED,
+        published_at=published,
     )
     admit_candidate(
         video_id,
@@ -133,6 +134,67 @@ def test_trust_tier_lifts_a_creator_above_the_count(conn):
     # tier 3 (x recency-decay) lifts one trusted creator well above a single
     # untiered creator's ~0.7 — the trust-tier carries "quality" into Strength.
     assert rel.strength > 2.0
+
+
+def test_untiered_strength_is_a_plain_distinct_creator_count(conn):
+    # Issue #49 AC: with no tiers set, Strength == the distinct-Creator count, and
+    # one prolific Creator's whole back-catalogue counts *once* (the echo-chamber
+    # guard, ADR-0013). Seed three Creators, all today, all default tier 1 — but
+    # Creator UC_a evidences the same relationship across THREE videos.
+    repo = Repository(conn)
+    for vid in ("v1", "v2", "v3"):
+        _admit_relation(repo, video_id=vid, channel_id="UC_a",
+                        subject="omega-3", predicate="protects_against",
+                        obj="Alzheimer's", published=NOW)
+    _admit_relation(repo, video_id="v4", channel_id="UC_b",
+                    subject="omega-3", predicate="protects_against",
+                    obj="Alzheimer's", published=NOW)
+    _admit_relation(repo, video_id="v5", channel_id="UC_c",
+                    subject="omega-3", predicate="protects_against",
+                    obj="Alzheimer's", published=NOW)
+
+    omega3 = _concept_id(repo, "omega-3")
+    [rel] = repo.concept_neighbourhood(omega3, now=NOW, half_life_days=365).relations
+
+    # Five evidencing Claims, but only three distinct Creators...
+    assert rel.creator_count == 3
+    # ...so Strength is exactly that count (every Creator tier 1, every Claim today,
+    # so recency-decay is 1.0): UC_a's three videos do not manufacture consensus.
+    assert abs(rel.strength - 3.0) < 1e-9
+
+
+def test_strength_sums_distinct_creators_by_tier_and_recency(conn):
+    # Issue #49 AC: seed evidencing Claims from several Creators at different tiers
+    # and dates and assert the exact Strength. With half-life 365d and NOW the
+    # reference instant, contributions land on round numbers:
+    #   UC_a  tier 1, today          -> 1 * 0.5**(0/365)   = 1.0
+    #   UC_b  tier 2, one half-life   -> 2 * 0.5**(365/365) = 1.0
+    #   UC_c  tier 1, prolific:                              = 1.0
+    #         a stale video a half-life back AND a fresh one today; the most-recent
+    #         contribution drives the Creator's single term -> 1 * 1.0 = 1.0
+    # Total = 3.0 over three distinct Creators (UC_c's two videos count once).
+    a_year_ago = NOW - timedelta(days=365)
+    repo = Repository(conn)
+    _admit_relation(repo, video_id="v1", channel_id="UC_a",
+                    subject="omega-3", predicate="protects_against",
+                    obj="Alzheimer's", published=NOW)
+    _admit_relation(repo, video_id="v2", channel_id="UC_b",
+                    subject="omega-3", predicate="protects_against",
+                    obj="Alzheimer's", published=a_year_ago)
+    _admit_relation(repo, video_id="v3", channel_id="UC_c",
+                    subject="omega-3", predicate="protects_against",
+                    obj="Alzheimer's", published=a_year_ago)
+    _admit_relation(repo, video_id="v4", channel_id="UC_c",
+                    subject="omega-3", predicate="protects_against",
+                    obj="Alzheimer's", published=NOW)
+    repo.set_creator_trust_tier(repo.creator_id("UC_b"), 2)
+    repo.commit()
+
+    omega3 = _concept_id(repo, "omega-3")
+    [rel] = repo.concept_neighbourhood(omega3, now=NOW, half_life_days=365).relations
+
+    assert rel.creator_count == 3
+    assert abs(rel.strength - 3.0) < 1e-9
 
 
 def test_unknown_concept_has_no_neighbourhood(conn):
