@@ -197,6 +197,30 @@ def test_strength_sums_distinct_creators_by_tier_and_recency(conn):
     assert abs(rel.strength - 3.0) < 1e-9
 
 
+def test_relations_carry_evidencing_claims_with_source_and_locator(conn):
+    # Issue #51 AC: every relationship in the neighbourhood links through to the
+    # Claims that evidence it — each a Citation clickable to its Source + locator
+    # deep-link, the *same* shape NL Query cites (consistent picture, ADR-0011).
+    repo = Repository(conn)
+    _admit_relation(repo, video_id="v1", channel_id="UC_a",
+                    subject="omega-3", predicate="protects_against", obj="Alzheimer's")
+    _admit_relation(repo, video_id="v2", channel_id="UC_b",
+                    subject="omega-3", predicate="protects_against", obj="Alzheimer's")
+
+    omega3 = _concept_id(repo, "omega-3")
+    [rel] = repo.concept_neighbourhood(omega3, now=NOW, half_life_days=365).relations
+
+    # Two distinct creators evidence it, so two Citations — one per evidencing Claim.
+    assert [c.claim_id for c in rel.evidence] == rel.evidence_claim_ids
+    assert len(rel.evidence) == 2
+
+    cite = rel.evidence[0]
+    assert cite.text == "omega-3 protects_against Alzheimer's."
+    assert cite.source_title == "Zone 2 Cardio Explained"
+    # The locator deep-link jumps straight to the moment the Claim was asserted.
+    assert cite.deep_link == "https://www.youtube.com/watch?v=v1&t=10s"
+
+
 def test_unknown_concept_has_no_neighbourhood(conn):
     repo = Repository(conn)
     assert repo.concept_neighbourhood(999999, now=NOW) is None

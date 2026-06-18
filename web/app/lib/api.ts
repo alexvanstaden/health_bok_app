@@ -278,6 +278,45 @@ export function getConcept(id: number): Promise<BokConcept> {
   return json(`/api/concepts/${id}`);
 }
 
+// -- The Concept neighbourhood view (issue #51, ADR-0013) -------------------
+// The lateral, Strength-ranked map of what a Concept connects to. Each relation
+// is a directed, signed-predicate link (src → predicate → dst), ranked by
+// evidence Strength (distinct creators × trust-tier × recency), flagged when the
+// pair is contested, and carrying the evidencing Claims as Citations — the *same*
+// shape NL Query returns — each clickable through to its Source + locator. Query
+// stays the primary exploration surface (ADR-0009/0011); this is the visual map.
+
+export type RelationCitation = {
+  claim_id: number;
+  text: string;
+  type: string;
+  deep_link: string; // back to the moment in the Source (watch?v=ID&t=NNNs)
+  source_title: string;
+};
+
+export type NeighbourRelation = {
+  relation_id: number;
+  src: ConceptRef;
+  predicate: string;
+  dst: ConceptRef;
+  strength: number;
+  creator_count: number;
+  contested: boolean;
+  via: ConceptRef | null; // the descendant a rolled-up relation lives on
+  evidence_claim_ids: number[];
+  evidence: RelationCitation[];
+};
+
+export type Neighbourhood = {
+  concept: ConceptRef;
+  sub_concepts: ConceptRef[];
+  relations: NeighbourRelation[];
+};
+
+export function getConceptNeighbourhood(id: number): Promise<Neighbourhood> {
+  return json(`/api/concepts/${id}/neighbourhood`);
+}
+
 // -- The personal layer (issue #16) -----------------------------------------
 // The owner-specific layer (CONTEXT.md "Personal Layer"): Goals, Markers,
 // Decisions, recorded through guided forms and linked to the evidence layer by

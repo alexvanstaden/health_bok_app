@@ -45,7 +45,8 @@ export default function ConceptDetail({ params }: { params: { id: string } }) {
             Referenced by {concept.claims.length} Claim
             {concept.claims.length === 1 ? "" : "s"} and {concept.protocols.length} Protocol
             {concept.protocols.length === 1 ? "" : "s"}.{" "}
-            <a href={`/claims?concept_id=${concept.id}`}>Browse its Claims →</a>
+            <a href={`/claims?concept_id=${concept.id}`}>Browse its Claims →</a>{" "}
+            <a href={`/concepts/${concept.id}/neighbourhood`}>Explore its neighbourhood →</a>
           </p>
 
           <div className="connections">

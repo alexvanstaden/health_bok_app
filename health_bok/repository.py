@@ -22,6 +22,7 @@ from .strength import (
 )
 from .models import (
     CandidateMetadata,
+    Citation,
     CreatorIdentity,
     EvidenceClaim,
     EvidenceDecision,
@@ -277,9 +278,12 @@ class NeighbourRelation:
 
     Carries the directed link, its evidence Strength and distinct-creator count
     (what ranks it), whether the pair is `contested` (an opposite or `no_effect_on`
-    predicate also holds on the same ordered pair), and — once hierarchy roll-up
-    lands (slice 3) — `via_*`, the descendant Concept the relationship actually
-    lives on when surfaced at a broader ancestor ("via Brain metabolism").
+    predicate also holds on the same ordered pair), the `evidence` Claims behind it
+    — each a `Citation` clickable through to its Source + locator, the *same* shape
+    natural-language Query cites (ADR-0011), so the two surfaces show one consistent
+    picture — and — once hierarchy roll-up lands (slice 3) — `via_*`, the descendant
+    Concept the relationship actually lives on when surfaced at a broader ancestor
+    ("via Brain metabolism").
     """
 
     relation_id: int
@@ -292,6 +296,7 @@ class NeighbourRelation:
     creator_count: int
     contested: bool
     evidence_claim_ids: list[int]
+    evidence: list[Citation] = field(default_factory=list)
     via_concept_id: int | None = None
     via_concept_name: str | None = None
 
@@ -1716,7 +1721,8 @@ class Repository:
             cur.execute(
                 "SELECT cr.id, cr.src_concept_id, src.name, cr.predicate, "
                 "       cr.dst_concept_id, dst.name, "
-                "       cre.claim_id, v.creator_id, creators.trust_tier, v.published_at "
+                "       cre.claim_id, v.creator_id, creators.trust_tier, v.published_at, "
+                "       cl.text, cl.type, cl.locator_seconds, v.url, v.title "
                 "FROM concept_relations cr "
                 "JOIN concepts src ON src.id = cr.src_concept_id "
                 "JOIN concepts dst ON dst.id = cr.dst_concept_id "
@@ -1738,12 +1744,21 @@ class Repository:
                 {
                     "src_id": r[1], "src_name": r[2], "predicate": r[3],
                     "dst_id": r[4], "dst_name": r[5],
-                    "claim_ids": set(), "contribs": [],
+                    "claim_ids": set(), "contribs": [], "evidence": {},
                 },
             )
             rel["claim_ids"].add(r[6])
             rel["contribs"].append(
                 EvidenceContribution(creator_id=r[7], trust_tier=r[8], dated=r[9])
+            )
+            # One Citation per distinct evidencing Claim — the same shape NL Query
+            # cites, clickable through to its Source + locator (ADR-0011, ADR-0013).
+            rel["evidence"].setdefault(
+                r[6],
+                Citation(
+                    claim_id=r[6], text=r[10], type=r[11],
+                    deep_link=locator_url(r[13], r[12]), source_title=r[14],
+                ),
             )
 
         # Contested: another predicate on the *same ordered pair* contradicts this one.
@@ -1771,6 +1786,7 @@ class Repository:
                     creator_count=distinct_creator_count(rel["contribs"]),
                     contested=contested,
                     evidence_claim_ids=sorted(rel["claim_ids"]),
+                    evidence=[rel["evidence"][cid] for cid in sorted(rel["evidence"])],
                     **_attribution(anchor_id, subtree_set, rel["src_id"],
                                    rel["src_name"], rel["dst_id"], rel["dst_name"]),
                 )
