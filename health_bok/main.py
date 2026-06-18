@@ -12,6 +12,10 @@ product surface — the Web App is the product, ADR-0009):
     `admitted` (or `failed`, retryable). The docker `worker` service runs this.
   * ``health-bok creators add|remove|list`` maintains the watch list of
     Creators, resolving an @handle/URL to a stable channel_id once at add-time.
+  * ``health-bok reprocess-relationships`` is a one-off backfill (issue #64): it
+    re-extracts every already-admitted video from its archived Transcript through
+    the supersede path so the pre-existing library gains lateral Relationships. No
+    YouTube/Whisper; resumable and idempotent. Needs the LLM + DB secrets.
 
 Creator management needs only ``DATABASE_URL`` plus the YouTube adapter, so it
 never requires the Digest or LLM secrets to be set.
@@ -37,6 +41,7 @@ from .config import Config
 from .db import connect, init_schema
 from .job import run_job
 from .models import CreatorResolutionError
+from .reprocess import reprocess_relationships
 from .repository import Repository
 from .summarizer import MapReduceSummarizer
 from .worker import drain
@@ -71,6 +76,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Seconds to wait before re-polling an empty queue (default 5).",
     )
     worker_p.set_defaults(handler=_cmd_worker)
+
+    reprocess_p = sub.add_parser(
+        "reprocess-relationships",
+        help="Re-establish lateral Relationships across the existing library (#64).",
+    )
+    reprocess_p.set_defaults(handler=_cmd_reprocess_relationships)
 
     creators_p = sub.add_parser("creators", help="Manage the watched Creators.")
     creators_p.set_defaults(handler=lambda a: creators_p.error("a subcommand is required"))
@@ -180,6 +191,44 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     return 0
+
+
+def _cmd_reprocess_relationships(_args: argparse.Namespace) -> int:
+    """Backfill lateral Relationships across the existing library (issue #64).
+
+    Builds only the Extractor (on the configured LLM provider, ADR-0012) and the
+    Embedder-backed `ConceptNormalizer` the re-extraction needs — no YouTube,
+    Whisper, or Digest, since only archived Transcripts are re-extracted. The run
+    is resumable and idempotent (see `reprocess.reprocess_relationships`), so it is
+    safe to re-run after an interruption. Needs the LLM + DB secrets.
+    """
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        normalizer = ConceptNormalizer(
+            OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            repo,
+            model=config.embedding_model(),
+            merge_distance=config.concept_merge_distance(),
+        )
+        extractor = ChatExtractor(llm.chat_model(config.extraction_model()))
+        result = reprocess_relationships(
+            extractor=extractor, normalizer=normalizer, repo=repo
+        )
+    finally:
+        conn.close()
+
+    logger.info(
+        "reprocess-relationships done: reprocessed=%d already_done=%d "
+        "skipped_no_transcript=%d failed=%d relations_removed=%d",
+        len(result.reprocessed), len(result.already_done),
+        len(result.skipped_no_transcript), len(result.failed),
+        result.relations_removed,
+    )
+    for video_id, error in result.failed:
+        logger.warning("reprocess failure: %s -> %s", video_id, error)
+    return 1 if result.failed else 0
 
 
 def _cmd_creator_add(args: argparse.Namespace) -> int:

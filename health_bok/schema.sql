@@ -571,3 +571,16 @@ ALTER TABLE impacts ADD CONSTRAINT impacts_stance_check
 ALTER TABLE impacts ADD COLUMN IF NOT EXISTS tier INTEGER NOT NULL DEFAULT 1
     CHECK (tier IN (1, 2));
 CREATE INDEX IF NOT EXISTS impacts_tier ON impacts (tier, state);
+
+-- One-off backfill bookkeeping (issue #64): re-establishing lateral Relationships
+-- across the *pre-existing* library by re-extracting each admitted video's archived
+-- Transcript through the supersede path (ADR-0005/0013). The supersede itself is
+-- idempotent, so this table exists only to make the batch **resumable** — a row
+-- records that a video's re-extraction has completed and committed, so an
+-- interrupted run can skip what it already finished and a second full run is a
+-- no-op (it never re-pays the Extractor). Keyed by the external video_id like
+-- `admissions`/`jobs` (not an FK to `videos`), and never has an entry removed.
+CREATE TABLE IF NOT EXISTS relationship_reprocess (
+    video_id       TEXT        PRIMARY KEY,
+    reprocessed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

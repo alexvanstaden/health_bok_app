@@ -1206,6 +1206,45 @@ class Repository:
             row = cur.fetchone()
         return row[0] if row else CANDIDATE
 
+    def admitted_video_ids(self) -> list[str]:
+        """Every video that has reached the `admitted` state, oldest first.
+
+        The set the relationship reprocess walks (issue #64): each one's archived
+        Transcript is re-extracted to re-project its Claims' triples into lateral
+        relationships. Ordered deterministically so an interrupted run resumes in
+        the same order it left off.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT video_id FROM admissions WHERE state = 'admitted' "
+                "ORDER BY video_id"
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def reprocessed_video_ids(self) -> set[str]:
+        """Videos whose relationship re-extraction has already completed (issue #64).
+
+        Read once at the start of a reprocess run so completed videos are skipped —
+        this is what makes the batch resumable and a second full run a no-op.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT video_id FROM relationship_reprocess")
+            return {r[0] for r in cur.fetchall()}
+
+    def mark_reprocessed(self, video_id: str) -> None:
+        """Record that a video's relationship re-extraction has completed (issue #64).
+
+        Written in the *same* transaction as the supersede it confirms, so the
+        progress marker and the re-projected relationships commit atomically — an
+        interrupt either leaves both done or neither. Idempotent on video_id.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO relationship_reprocess (video_id) VALUES (%s) "
+                "ON CONFLICT (video_id) DO NOTHING",
+                (video_id,),
+            )
+
     def load_fetched_transcript(self, video_id: str) -> FetchedTranscript | None:
         """Reassemble the archived Transcript + provenance for extraction.
 
