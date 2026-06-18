@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from health_bok import curation
 from health_bok.admit import admit_candidate
 from health_bok.concepts import ConceptNormalizer
 from health_bok.models import (
@@ -219,6 +220,80 @@ def test_relations_carry_evidencing_claims_with_source_and_locator(conn):
     assert cite.source_title == "Zone 2 Cardio Explained"
     # The locator deep-link jumps straight to the moment the Claim was asserted.
     assert cite.deep_link == "https://www.youtube.com/watch?v=v1&t=10s"
+
+
+def _broader_of(repo: Repository, broader: str, narrower: str) -> None:
+    """Confirm a `broader-of` edge between two existing Concepts (broader → narrower)."""
+    b, n = _concept_id(repo, broader), _concept_id(repo, narrower)
+    assert curation.propose_broader_of(b, n, repo=repo) is True
+    assert curation.confirm_broader_of(b, n, repo=repo) is True
+    repo.commit()
+
+
+def test_subtree_rolls_up_with_attribution_dedup_and_strength_order(conn):
+    # Issue #53 AC: a high-level Concept becomes a rich neighbourhood. Selecting
+    # "Brain" must surface every relationship in its whole `broader-of` subtree —
+    # attributed to the descendant it lives on, deduped across a DAG diamond, and
+    # Strength-ranked. Build a diamond:
+    #
+    #            Brain                     (anchor — relation seeded directly on it)
+    #           /     \
+    #   Brain metabolism   Neurochemistry  (children — relation on Brain metabolism)
+    #           \     /
+    #        mitochondria                  (reached by BOTH paths — relation here)
+    #
+    repo = Repository(conn)
+    # Strongest (3 distinct creators), on the diamond node reached by two paths.
+    for vid, chan in (("m1", "UC_a"), ("m2", "UC_b"), ("m3", "UC_c")):
+        _admit_relation(repo, video_id=vid, channel_id=chan, published=NOW,
+                        subject="mitochondria", predicate="associated_with", obj="ATP")
+    # Middle (2 distinct creators), on a child Concept.
+    for vid, chan in (("k1", "UC_a"), ("k2", "UC_b")):
+        _admit_relation(repo, video_id=vid, channel_id=chan, published=NOW,
+                        subject="Brain metabolism", predicate="associated_with",
+                        obj="ketones")
+    # Weakest (1 creator), directly on the anchor — must show up unattributed.
+    _admit_relation(repo, video_id="s1", channel_id="UC_a", published=NOW,
+                    subject="Brain", predicate="associated_with", obj="sleep")
+    # Neurochemistry is a pure taxonomy node (no relation of its own).
+    repo.add_concept("Neurochemistry")
+    repo.commit()
+
+    # Wire the diamond: mitochondria rolls up under both children of Brain.
+    _broader_of(repo, "Brain", "Brain metabolism")
+    _broader_of(repo, "Brain", "Neurochemistry")
+    _broader_of(repo, "Brain metabolism", "mitochondria")
+    _broader_of(repo, "Neurochemistry", "mitochondria")
+
+    hood = repo.concept_neighbourhood(_concept_id(repo, "Brain"),
+                                      now=NOW, half_life_days=365)
+    assert hood is not None
+
+    # Sub-Concepts: the whole subtree, with the diamond node listed once.
+    assert {c.name for c in hood.sub_concepts} == {
+        "Brain metabolism", "Neurochemistry", "mitochondria",
+    }
+
+    # Dedup: mitochondria is reachable by two DAG paths, but its relationship
+    # surfaces exactly once.
+    by_src = {r.src_name: r for r in hood.relations}
+    assert len(hood.relations) == 3
+    assert len([r for r in hood.relations if r.src_name == "mitochondria"]) == 1
+
+    # Attribution: a descendant's relationship is tagged with where it lives; the
+    # relationship on the anchor itself is unattributed.
+    assert by_src["mitochondria"].via_concept_name == "mitochondria"
+    assert by_src["Brain metabolism"].via_concept_name == "Brain metabolism"
+    assert by_src["Brain"].via_concept_id is None
+
+    # Strength order: best-supported first, regardless of where in the subtree it
+    # lives (3 creators > 2 creators > 1 creator, all dated today).
+    assert [r.src_name for r in hood.relations] == [
+        "mitochondria", "Brain metabolism", "Brain",
+    ]
+    assert by_src["mitochondria"].creator_count == 3
+    assert by_src["Brain metabolism"].creator_count == 2
+    assert by_src["Brain"].creator_count == 1
 
 
 def test_unknown_concept_has_no_neighbourhood(conn):

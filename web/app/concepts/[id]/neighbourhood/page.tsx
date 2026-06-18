@@ -48,9 +48,27 @@ export default function ConceptNeighbourhood({ params }: { params: { id: string 
           <p className="subtitle">
             What this Concept connects to, ranked by evidence Strength and drawn from
             your own Claims. Each connection links through to the Claims behind it.
-            To <em>explore</em> in prose, use{" "}
-            <a href="/ask">Ask</a>.
+            A high-level Concept rolls up its whole subtree: relationships living on a
+            narrower Concept appear here, tagged <em>via</em> where they live. To{" "}
+            <em>explore</em> in prose, use <a href="/ask">Ask</a>.
           </p>
+
+          {hood.sub_concepts.length > 0 && (
+            <section className="card">
+              <h2>Sub-Concepts</h2>
+              <p className="muted">
+                Narrower Concepts that roll up under {hood.concept.name}. Their
+                relationships are included below.
+              </p>
+              <ul className="sub-concepts">
+                {hood.sub_concepts.map((c) => (
+                  <li key={c.id}>
+                    <a href={`/concepts/${c.id}/neighbourhood`}>{c.name}</a>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           {hood.relations.length === 0 ? (
             <p className="muted">
