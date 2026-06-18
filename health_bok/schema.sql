@@ -431,3 +431,68 @@ CREATE TABLE IF NOT EXISTS impacts (
 );
 CREATE INDEX IF NOT EXISTS impacts_inbox ON impacts (state, stance);
 CREATE INDEX IF NOT EXISTS impacts_by_anchor ON impacts (anchor_type, anchor_id);
+
+
+-- ===========================================================================
+-- ADR-0013: Concepts connect to each other.
+--
+-- Two distinct families of Concept->Concept link, stored differently:
+--   * Lateral relationships — claim-grounded, derived, self-healing — in the
+--     typed `concept_relations` table below, with an evidence link back to the
+--     Claims that assert them (NOT the polymorphic `edges` table, whose `kind`
+--     CHECK would balloon under the predicate set).
+--   * Hierarchy (`broader-of`) — an owner-curated taxonomic edge — is a single new
+--     `kind` in the existing `edges` table (added in the `edges` CHECK above when
+--     slice 3 lands).
+-- Plus an owner-set trust-tier on `creators`, so relationship Strength can weight
+-- trusted sources more (ADR-0013 "Strength").
+-- ===========================================================================
+
+-- Owner-set trust-tier on a Creator (ADR-0013 "Strength"): higher = more trusted,
+-- so a relationship's Strength weights its distinct creators by how much the owner
+-- trusts each. Defaults to 1 so an untiered Creator counts as a plain distinct
+-- creator — Strength is a distinct-creator count until the owner tiers anyone
+-- (user story 29). Idempotent add for a database created before ADR-0013.
+ALTER TABLE creators ADD COLUMN IF NOT EXISTS trust_tier INTEGER NOT NULL DEFAULT 1
+    CHECK (trust_tier >= 1);
+
+-- A lateral relationship: a directed, typed Concept->Concept link
+-- ("APOE4 `risk_factor_for` Alzheimer's"), ADR-0013. It is a *materialized
+-- projection of Claims*, not a curated object: derived at admit time from the
+-- Claim's predicate triples and recomputed on supersede/delete (ADR-0005). The
+-- predicate is CHECK-constrained to the lean, signed, extensible vocabulary
+-- (`health_bok.predicates`) — a small lookup, not a Postgres ENUM, consistent with
+-- ADR-0008's treatment of edge `kind`; contradiction is *derived* from polarity in
+-- code, never stored. The UNIQUE on (src, predicate, dst) makes derivation
+-- idempotent: re-admitting the same Claim re-asserts the same relationship.
+CREATE TABLE IF NOT EXISTS concept_relations (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    src_concept_id BIGINT NOT NULL REFERENCES concepts (id),
+    predicate      TEXT   NOT NULL
+                          CHECK (predicate IN (
+                              'protects_against', 'risk_factor_for',
+                              'increases', 'decreases',
+                              'treats', 'worsens',
+                              'biomarker_of', 'measured_by', 'mechanism_of',
+                              'no_effect_on', 'associated_with')),
+    dst_concept_id BIGINT NOT NULL REFERENCES concepts (id),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A self-loop is never a meaningful relationship; reject it at the database.
+    CHECK (src_concept_id <> dst_concept_id),
+    UNIQUE (src_concept_id, predicate, dst_concept_id)
+);
+CREATE INDEX IF NOT EXISTS concept_relations_by_src ON concept_relations (src_concept_id);
+CREATE INDEX IF NOT EXISTS concept_relations_by_dst ON concept_relations (dst_concept_id);
+
+-- The evidence link: which Claim(s) assert each lateral relationship (ADR-0013).
+-- This is what makes a relationship claim-grounded and self-healing — its truth
+-- comes only from the owner's Claims (ADR-0011). A Claim's deletion cascades its
+-- evidence away; the derivation layer then removes any relationship left with no
+-- evidence (raising an `eroded` Impact rather than letting it vanish silently).
+CREATE TABLE IF NOT EXISTS concept_relation_evidence (
+    relation_id BIGINT NOT NULL REFERENCES concept_relations (id) ON DELETE CASCADE,
+    claim_id    BIGINT NOT NULL REFERENCES claims (id) ON DELETE CASCADE,
+    PRIMARY KEY (relation_id, claim_id)
+);
+CREATE INDEX IF NOT EXISTS relation_evidence_by_claim
+    ON concept_relation_evidence (claim_id);

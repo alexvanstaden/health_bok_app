@@ -22,12 +22,14 @@ import json
 
 from ..models import (
     ConceptMention,
+    ConceptTriple,
     ExtractedClaim,
     ExtractedProtocol,
     Extraction,
     FetchedTranscript,
 )
 from ..ports import ChatModel
+from ..predicates import VOCABULARY, normalize_predicate
 
 _MAX_TOKENS = 4096
 
@@ -48,10 +50,20 @@ _SYSTEM = (
     "STRUCTURED: an `action` plus at least one of `dose`, `timing`, `frequency`, "
     "`duration`. Vague advice with none of those is a claim, not a protocol.\n"
     "- For each item, list the Concept mentions it references (supplements, body "
-    "systems, mechanisms, conditions, interventions) as short canonical names.\n\n"
+    "systems, mechanisms, conditions, interventions) as short canonical names.\n"
+    "- For each CLAIM, also list the directed Concept->Concept relationships it "
+    "asserts as `triples` of {subject, predicate, object} — short canonical Concept "
+    "names for subject/object, and a `predicate` from this vocabulary: "
+    + ", ".join(sorted(VOCABULARY))
+    + ". The predicate is DIRECTIONAL (subject -> object). Use `no_effect_on` for an "
+    "explicit 'no effect / no benefit' finding. If you are unsure of the precise "
+    "predicate but the Claim clearly connects two Concepts, use `associated_with` — "
+    "never invent a predicate outside the vocabulary, and never emit a triple the "
+    "Claim does not actually assert.\n\n"
     "Respond with ONLY a JSON object of this exact shape, no prose:\n"
     '{"claims":[{"text":str,"locator_seconds":int,"type":str,'
-    '"concepts":[str]}],'
+    '"concepts":[str],'
+    '"triples":[{"subject":str,"predicate":str,"object":str}]}],'
     '"protocols":[{"action":str,"dose":str|null,"timing":str|null,'
     '"frequency":str|null,"duration":str|null,"locator_seconds":int,'
     '"concepts":[str]}]}'
@@ -100,6 +112,7 @@ def parse_extraction(raw: str) -> Extraction:
             locator_seconds=_as_seconds(c.get("locator_seconds")),
             type=c.get("type", "finding"),
             concepts=_mentions(c.get("concepts")),
+            triples=_triples(c.get("triples")),
         )
         for c in data.get("claims", [])
         if c.get("text")
@@ -137,3 +150,27 @@ def _as_seconds(value) -> int | None:
 
 def _mentions(names) -> list[ConceptMention]:
     return [ConceptMention(name=n) for n in (names or []) if n]
+
+
+def _triples(items) -> list[ConceptTriple]:
+    """Parse a Claim's directed Concept→Concept relationships (ADR-0013).
+
+    A triple missing either endpoint is dropped (a relationship needs both ends);
+    the predicate is normalized onto the vocabulary here, so an unclear or
+    out-of-vocabulary one becomes the signless `associated_with` fallback rather
+    than reaching the `concept_relations` CHECK.
+    """
+    triples: list[ConceptTriple] = []
+    for t in items or []:
+        subject = t.get("subject")
+        obj = t.get("object")
+        if not subject or not obj:
+            continue
+        triples.append(
+            ConceptTriple(
+                subject=ConceptMention(name=subject),
+                predicate=normalize_predicate(t.get("predicate")),
+                object=ConceptMention(name=obj),
+            )
+        )
+    return triples

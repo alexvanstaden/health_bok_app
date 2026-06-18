@@ -220,6 +220,25 @@ class BokConcept:
     protocols: list[ProtocolRef] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ConceptRelation:
+    """A lateral Concept→Concept relationship and the Claims that evidence it (ADR-0013).
+
+    The materialized projection of the owner's Claims: a directed
+    `src --predicate--> dst` link whose truth comes only from `evidence_claim_ids`
+    (ADR-0011). Lose the last evidencing Claim and the relationship is removed — it
+    never asserts something no Claim beneath it says.
+    """
+
+    id: int
+    src_concept_id: int
+    src_name: str
+    predicate: str
+    dst_concept_id: int
+    dst_name: str
+    evidence_claim_ids: list[int]
+
+
 def _vector_literal(embedding: list[float]) -> str:
     """Render a Python vector as a pgvector text literal (cast `::vector` in SQL).
 
@@ -1240,6 +1259,131 @@ class Repository:
                 (src_type, src_id, dst_type, dst_id, kind, json.dumps(props or {})),
             )
 
+    # -- Lateral relationships: claim-grounded Concept→Concept links (ADR-0013) --
+    #
+    # A relationship is a *materialized projection of Claims*, derived at admit time
+    # and self-healing on supersede/delete. `add_concept_relation` upserts the
+    # directed edge and records the evidencing Claim; deletes prune any relationship
+    # left with no evidence (the `eroded` event slice-4 alerting hangs off).
+
+    def add_concept_relation(
+        self,
+        src_concept_id: int,
+        predicate: str,
+        dst_concept_id: int,
+        *,
+        claim_id: int,
+    ) -> int:
+        """Derive (or re-assert) a lateral relationship and link its evidencing Claim.
+
+        Idempotent on both halves (ADR-0005): the UNIQUE on (src, predicate, dst)
+        collapses re-admission onto one relationship row, and the evidence link's
+        composite PK collapses a re-asserted Claim onto one evidence row. Returns
+        the relationship id. The caller guards against self-loops (the DB CHECK
+        also rejects them).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO concept_relations (src_concept_id, predicate, dst_concept_id) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (src_concept_id, predicate, dst_concept_id) DO UPDATE "
+                "  SET src_concept_id = EXCLUDED.src_concept_id "  # no-op to return id
+                "RETURNING id",
+                (src_concept_id, predicate, dst_concept_id),
+            )
+            relation_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO concept_relation_evidence (relation_id, claim_id) "
+                "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (relation_id, claim_id),
+            )
+        return relation_id
+
+    def prune_orphaned_relations(self, relation_ids: list[int]) -> list[ConceptRelation]:
+        """Remove any of `relation_ids` left with no evidencing Claim (ADR-0013).
+
+        Called on the supersede/delete path after a Claim's evidence links have
+        gone (they cascade with the Claim): a relationship whose last evidencing
+        Claim disappeared no longer rests on anything the owner's library says, so
+        it is removed rather than left asserting a connection no Claim supports. The
+        removed relationships are returned so the caller can raise an `eroded`
+        Impact (slice-4 alerting) instead of letting them vanish silently.
+        """
+        if not relation_ids:
+            return []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT cr.id, cr.src_concept_id, src.name, cr.predicate, "
+                "       cr.dst_concept_id, dst.name "
+                "FROM concept_relations cr "
+                "JOIN concepts src ON src.id = cr.src_concept_id "
+                "JOIN concepts dst ON dst.id = cr.dst_concept_id "
+                "WHERE cr.id = ANY(%s) AND NOT EXISTS ("
+                "  SELECT 1 FROM concept_relation_evidence e WHERE e.relation_id = cr.id)",
+                (relation_ids,),
+            )
+            orphaned = [
+                ConceptRelation(
+                    id=r[0],
+                    src_concept_id=r[1],
+                    src_name=r[2],
+                    predicate=r[3],
+                    dst_concept_id=r[4],
+                    dst_name=r[5],
+                    evidence_claim_ids=[],
+                )
+                for r in cur.fetchall()
+            ]
+            if orphaned:
+                cur.execute(
+                    "DELETE FROM concept_relations WHERE id = ANY(%s)",
+                    ([rel.id for rel in orphaned],),
+                )
+        return orphaned
+
+    def relations_evidenced_by(self, claim_id: int) -> list[int]:
+        """The ids of relationships a Claim currently evidences (ADR-0013).
+
+        Captured *before* a Claim is deleted/superseded so the surviving relations
+        can be re-checked for orphanhood afterwards (`prune_orphaned_relations`).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT relation_id FROM concept_relation_evidence WHERE claim_id = %s",
+                (claim_id,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def list_concept_relations(self) -> list[ConceptRelation]:
+        """Every lateral relationship with its evidencing Claim ids (ADR-0013).
+
+        A whole-graph read used by tests and the relationship browser; the
+        neighbourhood view (slice 2) layers ranking and subtree roll-up on top.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT cr.id, cr.src_concept_id, src.name, cr.predicate, "
+                "       cr.dst_concept_id, dst.name, "
+                "       ARRAY(SELECT claim_id FROM concept_relation_evidence e "
+                "             WHERE e.relation_id = cr.id ORDER BY claim_id) "
+                "FROM concept_relations cr "
+                "JOIN concepts src ON src.id = cr.src_concept_id "
+                "JOIN concepts dst ON dst.id = cr.dst_concept_id "
+                "ORDER BY cr.id",
+            )
+            return [
+                ConceptRelation(
+                    id=r[0],
+                    src_concept_id=r[1],
+                    src_name=r[2],
+                    predicate=r[3],
+                    dst_concept_id=r[4],
+                    dst_name=r[5],
+                    evidence_claim_ids=list(r[6]),
+                )
+                for r in cur.fetchall()
+            ]
+
     def nearest_concept(
         self, embedding: list[float], *, model: str
     ) -> NearestConcept | None:
@@ -1742,6 +1886,10 @@ class Repository:
         Claim's own edges (as either endpoint) itself or they would dangle. Returns
         whether the Claim existed.
         """
+        # Capture the lateral relationships this Claim evidences *before* it goes:
+        # deleting the Claim cascades its evidence links away, after which any
+        # relationship left unevidenced is self-healed (ADR-0013).
+        evidenced = self.relations_evidenced_by(claim_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM edges WHERE (src_type = 'claim' AND src_id = %(id)s) "
@@ -1758,7 +1906,10 @@ class Repository:
                 (claim_id,),
             )
             cur.execute("DELETE FROM claims WHERE id = %s", (claim_id,))
-            return cur.rowcount > 0
+            existed = cur.rowcount > 0
+        # Remove relationships whose last evidencing Claim was this one.
+        self.prune_orphaned_relations(evidenced)
+        return existed
 
     def delete_protocol(self, protocol_id: int) -> bool:
         """Delete a Protocol and the edges/embeddings hanging off it (issue #14).

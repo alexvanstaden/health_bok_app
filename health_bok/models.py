@@ -184,6 +184,25 @@ class ConceptMention:
 
 
 @dataclass(frozen=True)
+class ConceptTriple:
+    """A directed Concept→Concept relationship the Extractor drew from a Claim (ADR-0013).
+
+    The claim-grounded evidence for one lateral relationship: a `subject` Concept
+    mention, a `predicate` naming *how* it relates, and an `object` Concept mention
+    — "APOE4 `risk_factor_for` Alzheimer's". Directional (subject → predicate →
+    object), so "raises risk" is never confused with its reverse (user story 7).
+    Endpoints are *mentions*, normalized onto canonical Concepts at admit time by
+    the same `ConceptNormalizer` the flat mention list uses; the `predicate` is one
+    of the lean vocabulary (`health_bok.predicates`), falling back to the signless
+    `associated_with` when unclear (ADR-0010, user story 8).
+    """
+
+    subject: ConceptMention
+    predicate: str
+    object: ConceptMention
+
+
+@dataclass(frozen=True)
 class ExtractedClaim:
     """One load-bearing Claim the Extractor drew from a Transcript (ADR-0010).
 
@@ -191,12 +210,18 @@ class ExtractedClaim:
     Extractor could not ground carries ``None`` and is *dropped* at admit time,
     never smoothed over (ADR-0010 "grounded or dropped"). Scope qualifiers ("in
     mice", "at 5g/day") stay verbatim in `text` (ADR-0002). Sub-kind is a `type`.
+
+    `triples` are the directed Concept→Concept relationships this Claim asserts
+    (ADR-0013): each becomes a claim-grounded lateral relationship at admit time,
+    with the Claim recorded as its evidence so the relationship self-heals when the
+    Claim is superseded or deleted.
     """
 
     text: str
     locator_seconds: int | None = None
     type: str = "finding"  # mechanism | principle | finding
     concepts: list[ConceptMention] = field(default_factory=list)
+    triples: list[ConceptTriple] = field(default_factory=list)
 
     @property
     def is_grounded(self) -> bool:
