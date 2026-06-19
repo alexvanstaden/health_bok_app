@@ -1,8 +1,10 @@
 """The Logs page's read model: admitted/failed video Sources, newest-first (issue #33).
 
 The Logs page is a read-only record of every video the pipeline carried to a terminal
-admission. Its whole behaviour lives in one repository query — videos ⋈ creators ⋈
-latest Summary ⋈ admission state — which the `GET /api/videos` endpoint serialises
+admission, whether or not it carries a Summary (issue #79). Its whole behaviour lives
+in one repository query — videos ⋈ creators ⋈ admission state, latest Summary
+left-joined so its absence drops the body to None — which the `GET /api/videos`
+endpoint serialises
 verbatim (the thin-serialisation pattern the API uses throughout, and which the test
 suite deliberately does not import — see `health_bok/api.py`). So these drive the query
 directly against a real Postgres: ordering, the BoK-state badge (`admitted`/`failed`),
@@ -67,6 +69,31 @@ def test_admitted_and_failed_listed_newest_added_first(conn):
     assert by_id["vid_admitted"].creator_name == "Longevity Lab"
     assert by_id["vid_admitted"].added_at == _at(1)
     assert "mitochondrial density" in by_id["vid_admitted"].summary
+
+
+def test_admitted_without_summary_is_listed(conn):
+    repo = Repository(conn)
+
+    # A backfill admission reaches the Body of Knowledge without ever being
+    # summarized: it has a Transcript and a terminal admission but no Summary row.
+    # It must still appear on the log, with summary left None (issue #79).
+    seed_processed_video(
+        repo,
+        video_id="vid_no_summary",
+        channel_name="Backfill Creator",
+        title="An Admitted Backfill Video",
+        summary=None,
+        retrieved_at=_at(3),
+    )
+    repo.set_admission("vid_no_summary", "admitted")
+    repo.commit()
+
+    [video] = repo.list_processed_videos()
+    assert video.video_id == "vid_no_summary"
+    assert video.bok_state == "admitted"
+    assert video.summary is None
+    assert video.title == "An Admitted Backfill Video"
+    assert video.creator_name == "Backfill Creator"
 
 
 def test_in_flight_and_never_approved_videos_are_hidden(conn):

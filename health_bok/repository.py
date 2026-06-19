@@ -142,19 +142,21 @@ class DailyCandidate:
 class ProcessedVideo:
     """A processed video Source for the Logs page (issue #33).
 
-    A read-only record row: a video the pipeline has fully processed (Transcript +
-    Summary) that has reached a terminal admission. `bok_state` is `admitted` (it
-    reached the Body of Knowledge) or `failed` (extraction errored). Videos still in
-    flight or never acted on are not listed — the log shows only admitted or failed.
-    The Logs page is labelled "Logs" by the owner's explicit choice — a known
-    divergence from the CONTEXT.md "Source" glossary.
+    A read-only record row: a video the pipeline has carried to a terminal admission.
+    `bok_state` is `admitted` (it reached the Body of Knowledge) or `failed`
+    (extraction errored). `summary` is the latest Summary's body, or `None` when the
+    video reached a terminal admission without ever being summarized — a backfill
+    admission, which skips the daily summarize step, leaves no Summary (issue #79).
+    Videos still in flight or never acted on are not listed — the log shows only
+    admitted or failed. The Logs page is labelled "Logs" by the owner's explicit
+    choice — a known divergence from the CONTEXT.md "Source" glossary.
     """
 
     video_id: str
     title: str
     creator_name: str
     added_at: datetime
-    summary: str
+    summary: str | None
     bok_state: str  # 'admitted' | 'failed'
 
 
@@ -1320,17 +1322,19 @@ class Repository:
             ]
 
     def list_processed_videos(self) -> list[ProcessedVideo]:
-        """Processed videos that reached a terminal admission, newest-added first
-        (issue #33).
+        """Videos that reached a terminal admission, newest-added first (issue #33).
 
-        Backs the read-only Logs page: a record of what the pipeline has carried into
-        the Body of Knowledge. A row appears only once a processed video (Transcript +
-        Summary archived) has reached a *terminal* admission state — `admitted` (in
-        the Body of Knowledge) or `failed` (extraction errored). Videos still in flight
-        or never acted on (no admission row, `approved`/`processing`/`rejected`) are
+        Backs the read-only Logs page: an honest, complete record of what the pipeline
+        has acted on. A row appears for every video in a *terminal* admission state —
+        `admitted` (in the Body of Knowledge) or `failed` (extraction errored) —
+        whether or not it carries a Summary (issue #79). A backfill admission skips the
+        daily summarize step, so it has all its Claims and Protocols yet no Summary; it
+        still belongs in the log, with `summary` left `None`. Videos still in flight or
+        never acted on (no admission row, `approved`/`processing`/`rejected`) are
         deliberately hidden: the owner asked the log to show only what was admitted or
-        failed, not the daily review backlog. One query: videos ⋈ creators ⋈ latest
-        Summary ⋈ admission state. Ordered by `retrieved_at` (when the system pulled it
+        failed, not the daily review backlog. One query: videos ⋈ creators ⋈ admission
+        state, with the latest Summary left-joined so its absence drops the body to
+        NULL rather than the row. Ordered by `retrieved_at` (when the system pulled it
         in — the "date added") so the newest record is first; `bok_state` is the
         admission state, always `admitted` or `failed` here.
         """
@@ -1338,16 +1342,14 @@ class Repository:
             cur.execute(
                 "SELECT v.video_id, v.title, cr.name, v.retrieved_at, s.body, "
                 "       a.state AS bok_state "
-                "FROM processing_state ps "
-                "JOIN videos v ON v.video_id = ps.video_id "
+                "FROM videos v "
                 "JOIN creators cr ON cr.id = v.creator_id "
                 "JOIN admissions a ON a.video_id = v.video_id "
-                "JOIN LATERAL ("
+                "LEFT JOIN LATERAL ("
                 "  SELECT body FROM summaries s WHERE s.video_id = v.video_id "
                 "  ORDER BY s.created_at DESC, s.id DESC LIMIT 1"
                 ") s ON TRUE "
-                "WHERE ps.summarized_at IS NOT NULL "
-                "  AND a.state IN ('admitted', 'failed') "
+                "WHERE a.state IN ('admitted', 'failed') "
                 "ORDER BY v.retrieved_at DESC, v.video_id"
             )
             return [

@@ -143,7 +143,7 @@ export type ProcessedVideo = {
   title: string;
   creator: string;
   added_at: string;
-  summary: string;
+  summary: string | null; // null when admitted without a Summary, e.g. backfill (issue #79)
   bok_state: "admitted" | "failed";
 };
 

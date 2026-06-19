@@ -444,8 +444,9 @@ def list_videos() -> dict:
     """The Logs page: a read-only record of admitted/failed video Sources (issue #33).
 
     Newest-added first, each with its title, Creator, the date it was added, a
-    snippet of its latest Summary, and a BoK-state badge (admitted / failed). Only
-    videos that reached a terminal admission are listed — ones still in flight or
+    snippet of its latest Summary (`null` when the video was admitted without one —
+    e.g. a backfill admission, issue #79), and a BoK-state badge (admitted / failed).
+    Only videos that reached a terminal admission are listed — ones still in flight or
     never approved are hidden. Backed by one repository query; the page links each
     row to the video's Claims page. Read-only: no actions.
     """
@@ -458,7 +459,7 @@ def list_videos() -> dict:
                 "title": v.title,
                 "creator": v.creator_name,
                 "added_at": v.added_at.isoformat(),
-                "summary": _snippet(v.summary),
+                "summary": _snippet(v.summary) if v.summary else None,
                 "bok_state": v.bok_state,
             }
             for v in videos
