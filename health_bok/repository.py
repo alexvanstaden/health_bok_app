@@ -8,6 +8,7 @@ half-archived video, keeping the job idempotent and crash-safe (user story 22).
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
@@ -42,6 +43,29 @@ from .models import (
 # The implicit lifecycle state of a daily Candidate that has no `admissions` row
 # yet: a plain, un-acted-on candidate (CONTEXT.md "Candidate"; ADR-0004).
 CANDIDATE = "candidate"
+
+# The lifecycle states a Candidate can still occupy while it sits in a review
+# queue (ADR-0004). Admitted ones have moved into the Body of Knowledge and
+# rejected ones are declined, so both have left the queue and are absent here.
+# The two queue listings restrict to these, and the processing-status filter
+# (issue #75) narrows *within* them.
+QUEUE_STATES = (CANDIDATE, "approved", "processing", "failed")
+
+
+def _queue_states(statuses: Sequence[str] | None) -> tuple[str, ...]:
+    """Resolve a processing-status filter to the queue states to list (issue #75).
+
+    `None` — or an empty / all-unknown selection — means *unfiltered*: every queue
+    state. Otherwise the selection is intersected with `QUEUE_STATES` in canonical
+    order, so an unrecognised value can neither widen the query (admitted/rejected
+    never leak back in) nor reach the SQL unsanitised — the IN-list is always built
+    from this trusted tuple, never from raw caller input.
+    """
+    if not statuses:
+        return QUEUE_STATES
+    wanted = set(statuses)
+    chosen = tuple(s for s in QUEUE_STATES if s in wanted)
+    return chosen or QUEUE_STATES
 
 
 @dataclass(frozen=True)
@@ -836,7 +860,7 @@ class Repository:
             ]
 
     def list_backfill_candidates(
-        self, *, newest_first: bool = True
+        self, *, newest_first: bool = True, statuses: Sequence[str] | None = None
     ) -> list[StoredCandidate]:
         """Backfill Candidates awaiting the owner's decision, sorted by publish date.
 
@@ -850,8 +874,13 @@ class Repository:
         `newest_first` (the default) sorts most-recently-published first; pass False
         to flip to oldest-first (issue #31). The sort is on `published_at`, which the
         lazy detail fetch corrects, so the ordering sharpens as Candidates are fetched.
+
+        `statuses` narrows the queue to one or more processing states (issue #75);
+        omitting it (or passing an empty selection) lists every queue state.
         """
         direction = "DESC" if newest_first else "ASC"
+        states = _queue_states(statuses)
+        placeholders = ", ".join(["%s"] * len(states))
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT c.video_id, cr.channel_id, c.title, c.description, c.url, "
@@ -859,10 +888,9 @@ class Repository:
                 "FROM candidates c "
                 "JOIN creators cr ON cr.id = c.creator_id "
                 "LEFT JOIN admissions a ON a.video_id = c.video_id "
-                "WHERE COALESCE(a.state, %s) IN "
-                "      (%s, 'approved', 'processing', 'failed') "
+                f"WHERE COALESCE(a.state, %s) IN ({placeholders}) "
                 f"ORDER BY c.published_at {direction}, c.video_id",
-                (CANDIDATE, CANDIDATE, CANDIDATE),
+                (CANDIDATE, CANDIDATE, *states),
             )
             return [
                 StoredCandidate(
@@ -1161,7 +1189,9 @@ class Repository:
 
     # -- review queue (reads) ------------------------------------------------
 
-    def list_daily_candidates(self) -> list[DailyCandidate]:
+    def list_daily_candidates(
+        self, *, statuses: Sequence[str] | None = None
+    ) -> list[DailyCandidate]:
         """Daily Candidates awaiting the owner's decision, newest published first.
 
         A daily Candidate is a processed video (Transcript + Summary) not yet
@@ -1169,7 +1199,12 @@ class Repository:
         in flight (`approved`/`processing`/`failed`). Admitted videos have moved
         into the Body of Knowledge and rejected ones are declined, so neither
         shows here. Each carries its latest Summary for review (ADR-0007).
+
+        `statuses` narrows the queue to one or more processing states (issue #75);
+        omitting it (or passing an empty selection) lists every queue state.
         """
+        states = _queue_states(statuses)
+        placeholders = ", ".join(["%s"] * len(states))
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT v.video_id, v.title, v.url, "
@@ -1182,10 +1217,9 @@ class Repository:
                 "  ORDER BY s.created_at DESC, s.id DESC LIMIT 1"
                 ") s ON TRUE "
                 "LEFT JOIN admissions a ON a.video_id = v.video_id "
-                "WHERE COALESCE(a.state, %s) IN "
-                "      (%s, 'approved', 'processing', 'failed') "
+                f"WHERE COALESCE(a.state, %s) IN ({placeholders}) "
                 "ORDER BY v.published_at DESC, v.video_id",
-                (CANDIDATE, CANDIDATE, CANDIDATE),
+                (CANDIDATE, CANDIDATE, *states),
             )
             return [
                 DailyCandidate(

@@ -16,25 +16,30 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BackfillCandidate,
   BackfillOrder,
+  ProcessingStatus,
   approveBackfillCandidates,
   approveCandidate,
   fetchBackfillDetails,
   listBackfillCandidates,
   rejectBackfillCandidates,
 } from "../lib/api";
+import { QueueToolbar } from "../lib/QueueToolbar";
 
 export default function BackfillQueue() {
   const [candidates, setCandidates] = useState<BackfillCandidate[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [order, setOrder] = useState<BackfillOrder>("newest");
+  const [statuses, setStatuses] = useState<ProcessingStatus[]>([]);
   const [fetching, setFetching] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
+  // Filter and sort are both server-side and compose; `refresh` closes over both,
+  // so the 3s poll re-subscribes on either change and preserves the active filter.
   const refresh = useCallback(async () => {
     try {
-      const { candidates } = await listBackfillCandidates(order);
+      const { candidates } = await listBackfillCandidates(order, statuses);
       setCandidates(candidates);
       setError(null);
     } catch (e) {
@@ -42,7 +47,7 @@ export default function BackfillQueue() {
     } finally {
       setLoaded(true);
     }
-  }, [order]);
+  }, [order, statuses]);
 
   // Poll so worker-driven state transitions (approved → processing → admitted)
   // become visible, and approved/admitted Candidates drop out of the queue.
@@ -166,7 +171,10 @@ export default function BackfillQueue() {
         >
           Reject selected ({selected.size})
         </button>
-        <span className="spacer" />
+      </div>
+
+      {/* The shared filter toolbar, with the queue's own sort slotted alongside. */}
+      <QueueToolbar statuses={statuses} onChange={setStatuses}>
         <label className="muted">
           Sort:{" "}
           <select
@@ -177,11 +185,15 @@ export default function BackfillQueue() {
             <option value="oldest">Oldest first</option>
           </select>
         </label>
-      </div>
+      </QueueToolbar>
 
       {error && <p className="error">API error: {error}</p>}
       {loaded && candidates.length === 0 && !error && (
-        <p className="muted">No backfill Candidates awaiting review. Trigger one from Creators.</p>
+        <p className="muted">
+          {statuses.length > 0
+            ? "No backfill Candidates match this filter."
+            : "No backfill Candidates awaiting review. Trigger one from Creators."}
+        </p>
       )}
 
       {candidates.map((c) => (

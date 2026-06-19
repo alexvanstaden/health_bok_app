@@ -9,21 +9,26 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Candidate,
+  ProcessingStatus,
   approveCandidate,
   listCandidates,
   rejectCandidate,
   retryCandidate,
 } from "./lib/api";
+import { QueueToolbar } from "./lib/QueueToolbar";
 
 export default function ReviewQueue() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [statuses, setStatuses] = useState<ProcessingStatus[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
+  // The filter is server-side: re-fetch on change, and the 3s poll below carries
+  // the active selection (refresh closes over `statuses`), so it never resets.
   const refresh = useCallback(async () => {
     try {
-      const { candidates } = await listCandidates();
+      const { candidates } = await listCandidates(statuses);
       setCandidates(candidates);
       setError(null);
     } catch (e) {
@@ -31,7 +36,7 @@ export default function ReviewQueue() {
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [statuses]);
 
   // Poll so worker-driven state transitions become visible without a reload.
   useEffect(() => {
@@ -62,9 +67,15 @@ export default function ReviewQueue() {
         Daily Candidates awaiting your approval into the Body of Knowledge.
       </p>
 
+      <QueueToolbar statuses={statuses} onChange={setStatuses} />
+
       {error && <p className="error">API error: {error}</p>}
       {loaded && candidates.length === 0 && !error && (
-        <p className="muted">Nothing to review right now.</p>
+        <p className="muted">
+          {statuses.length > 0
+            ? "No Candidates match this filter."
+            : "Nothing to review right now."}
+        </p>
       )}
 
       {candidates.map((c) => {

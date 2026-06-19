@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Iterator
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -162,10 +162,17 @@ def health() -> dict:
 
 
 @app.get("/api/candidates")
-def list_candidates() -> dict:
-    """The daily review queue: Candidates with their Summary and state (ADR-0007)."""
+def list_candidates(
+    status: list[str] | None = Query(default=None),
+) -> dict:
+    """The daily review queue: Candidates with their Summary and state (ADR-0007).
+
+    `status` is an optional, repeatable processing-status filter (issue #75) — one
+    or more of `candidate`/`approved`/`processing`/`failed`. Omitting it returns the
+    full queue; unknown values are ignored server-side.
+    """
     with _repo() as repo:
-        candidates = repo.list_daily_candidates()
+        candidates = repo.list_daily_candidates(statuses=status)
     return {
         "candidates": [
             {
@@ -319,13 +326,21 @@ def _backfill_payload(c) -> dict:
 
 
 @app.get("/api/backfill")
-def list_backfill(order: str = "newest") -> dict:
+def list_backfill(
+    order: str = "newest",
+    status: list[str] | None = Query(default=None),
+) -> dict:
     """The backfill review queue: metadata-only Candidates awaiting a decision.
 
     `order` sorts by publish date — `newest` (default) or `oldest` (issue #31).
+    `status` is an optional, repeatable processing-status filter (issue #75) — one
+    or more of `candidate`/`approved`/`processing`/`failed`; omitting it returns the
+    full queue. The filter and sort compose: the queue is narrowed, then ordered.
     """
     with _repo() as repo:
-        candidates = repo.list_backfill_candidates(newest_first=order != "oldest")
+        candidates = repo.list_backfill_candidates(
+            newest_first=order != "oldest", statuses=status
+        )
     return {"candidates": [_backfill_payload(c) for c in candidates]}
 
 

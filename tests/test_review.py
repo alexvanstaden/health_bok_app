@@ -60,6 +60,35 @@ def test_candidate_carries_creator_name_for_subtitle(conn):
     assert queue[0].creator == "Huberman Lab"
 
 
+def test_daily_candidates_filter_by_processing_status(conn):
+    # The review queue can be narrowed to one or more processing states (issue #75).
+    # Omitting the filter lists every queue state; a selection narrows server-side.
+    repo = Repository(conn)
+    seed_processed_video(repo, video_id="vid_plain")
+    seed_processed_video(repo, video_id="vid_failed")
+    seed_processed_video(repo, video_id="vid_approved")
+    repo.set_admission("vid_failed", "failed")
+    repo.set_admission("vid_approved", "approved")
+    repo.commit()
+
+    def ids(**kw):
+        return {c.video_id for c in repo.list_daily_candidates(**kw)}
+
+    # Unfiltered (and the empty selection) lists every queue state.
+    assert ids() == {"vid_plain", "vid_failed", "vid_approved"}
+    assert ids(statuses=[]) == {"vid_plain", "vid_failed", "vid_approved"}
+
+    # A single state narrows to just that state.
+    assert ids(statuses=["failed"]) == {"vid_failed"}
+
+    # Multiple states union.
+    assert ids(statuses=["candidate", "approved"]) == {"vid_plain", "vid_approved"}
+
+    # An unknown value can't widen the query back to admitted/rejected; with no
+    # recognised value left, it falls back to the full queue rather than erroring.
+    assert ids(statuses=["admitted"]) == {"vid_plain", "vid_failed", "vid_approved"}
+
+
 def _job_count(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM jobs")

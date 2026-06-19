@@ -391,6 +391,13 @@ stores both, and shows them in place — the expensive per-video call happens on
 The *Backfill* tab can be **sorted by publish date** (newest- or oldest-first), and the
 ordering sharpens for any Candidate whose details you've fetched.
 
+Both review queues — the daily one and *Backfill* — carry a shared **filter toolbar** that
+narrows the list by **processing status**: tick one or more of `candidate`, `approved`,
+`processing`, or `failed` to show only those, and clear the selection to return to the full
+queue (admitted and rejected Candidates have already left the queue, so they aren't listed).
+The filter is applied server-side and survives the queues' 3-second polling; on *Backfill* it
+composes with the publish-date sort.
+
 ## One-off videos (the "Process me" playlist)
 
 Sometimes you want to feed in a *single* video without subscribing to its Creator. Instead of
