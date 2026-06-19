@@ -31,6 +31,12 @@ Summary are persisted, so re-running reprocesses nothing and sends no second ema
 Digest send retries on the next run without re-summarizing. One Creator's error (an
 unreachable feed, a missing transcript) is isolated and never aborts the rest of the run.
 
+The same tick can also pull in **one-off videos** you don't want to subscribe to a whole
+Creator for. Set `PROCESS_ME_PLAYLIST_ID` to an unlisted YouTube playlist (a "Process me"
+list) and every new video you save there is run through the *same* spine and lands in the
+review queue — without adding its Creator to your watch list. See
+[One-off videos](#one-off-videos-the-process-me-playlist).
+
 ### The Web App & knowledge graph
 
 The primary interface. It loads over Tailscale with **no login** — the tailnet is the auth
@@ -202,6 +208,7 @@ All secrets come from the environment — never hard-coded. See `.env.example`:
 | `SUMMARY_MAX_CHARS`        | Map-reduce above this Transcript length (default `48000`) |
 | `SUMMARY_CHUNK_CHARS`      | Section size when map-reducing (default `16000`)   |
 | `BACKFILL_CUTOFF_DAYS`     | Backfill window when a Creator is added (default `730`, ~2 years) |
+| `PROCESS_ME_PLAYLIST_ID`   | Unlisted "Process me" playlist for one-off ingestion (optional; unset → off) |
 | `DIGEST_ENABLED`           | Send the Digest email at all (default `true`; `false` → no Resend secrets needed) |
 | `RESEND_API_KEY`           | Resend — the DigestSender (only when `DIGEST_ENABLED`) |
 | `DIGEST_FROM`              | Verified Resend "from" address (only when `DIGEST_ENABLED`) |
@@ -379,6 +386,35 @@ runs a single per-video lookup that loads the real description and the accurate 
 stores both, and shows them in place — the expensive per-video call happens only when you ask.
 The *Backfill* tab can be **sorted by publish date** (newest- or oldest-first), and the
 ordering sharpens for any Candidate whose details you've fetched.
+
+## One-off videos (the "Process me" playlist)
+
+Sometimes you want to feed in a *single* video without subscribing to its Creator. Instead of
+adding the Creator to your watch list (which would then poll and backfill it forever), point
+the system at an **unlisted YouTube playlist** you control:
+
+1. In YouTube, create one unlisted playlist (e.g. "Process me"). Open it and copy its
+   **playlist ID** from the URL (`...playlist?list=<ID>` — it usually starts with `PL`).
+2. Set `PROCESS_ME_PLAYLIST_ID=<ID>` in the deploy's `.env` and restart the pipeline. With it
+   unset, nothing changes.
+3. Whenever you come across a video worth processing, **Save → Process me**.
+
+On each daily tick the job also reads that playlist's public RSS feed (no Google login, no
+OAuth) and runs any **new** video through the *same* path as a watched Creator: Transcript →
+Summary → **Candidate in the review queue**, where you approve it like everything else. The
+video's Creator is recorded so its Claims are attributable and count toward Strength (at the
+default trust-tier 1), but it is **not** added to your watch list — it never appears under
+*Creators*, is never polled, and is never backfilled.
+
+Notes:
+
+- **Leave videos in the playlist.** Dedup is by video ID against everything already known (a
+  video, a Candidate, or an admission), so a video is processed exactly once and the playlist
+  is safe to let grow — the review queue is your record of what's been handled. The system
+  never edits the playlist.
+- **RSS window.** The feed returns only the ~15 most-recent items, so adding more than ~15
+  videos *between* daily runs can miss the oldest. Either space out bulk additions or run
+  `health-bok run` again to catch up.
 
 ## Schedule the daily job
 

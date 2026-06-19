@@ -74,6 +74,7 @@ def run_job(
     model: str,
     send_digest: bool = True,
     webapp_base_url: str = "",
+    process_me_playlist_id: str = "",
     now=_utcnow,
 ) -> RunResult:
     """Run the daily detection pipeline across every watched Creator.
@@ -82,6 +83,12 @@ def run_job(
     already-processed set, processes only the new videos, and — unless
     `send_digest` is off — sends one Digest bundling everything not yet emailed
     (or no Digest at all on an empty day).
+
+    When `process_me_playlist_id` is given, the same tick also reads that unlisted
+    playlist's RSS feed and drives any *new* videos through the same spine (issue
+    #69): their Creators are recorded for attribution but never added to the watch
+    list, polled, or backfilled. Unset (the default), no playlist is read and the
+    run is unchanged.
 
     The Digest is only a notification (ADR-0007): with `send_digest` off the
     pipeline still archives and summarizes, leaving the Summaries unsent so a
@@ -123,6 +130,20 @@ def run_job(
             processed.add(video_id)
             newly_processed.append(video_id)
 
+    if process_me_playlist_id:
+        _ingest_playlist(
+            process_me_playlist_id,
+            content_source=content_source,
+            transcriber=transcriber,
+            summarizer=summarizer,
+            repo=repo,
+            model=model,
+            processed=processed,
+            newly_processed=newly_processed,
+            failures=failures,
+            now=now,
+        )
+
     if not send_digest:
         # Email is off (ADR-0007). Everything is archived and summarized; the
         # Summaries stay unsent for a later run, and the system is fully usable
@@ -163,6 +184,64 @@ def run_job(
         digest_item_count=len(pending),
         failures=failures,
     )
+
+
+def _ingest_playlist(
+    playlist_id: str,
+    *,
+    content_source: ContentSource,
+    transcriber: Transcriber,
+    summarizer: Summarizer,
+    repo: Repository,
+    model: str,
+    processed: set[str],
+    newly_processed: list[str],
+    failures: list[RunFailure],
+    now,
+) -> None:
+    """Ingest new videos from the one-off "Process me" playlist (issue #69).
+
+    Reads the unlisted playlist's RSS feed and drives any video not already known —
+    as a processed video, a Candidate, or an admission — through the *same* spine as
+    a watched-Creator upload, so a one-off video reaches the review queue identically
+    (ADR-0004, one gate). The video's Creator is recorded for attribution only (the
+    archive upsert marks a brand-new one not-subscribed); it is never added to the
+    watch list. Dedup makes the playlist safe to accumulate: re-running reprocesses
+    nothing, and the system never mutates the playlist. A discovery failure is
+    isolated like a single Creator's, and a per-video failure rolls back and skips.
+    """
+    try:
+        discovered = content_source.discover_playlist_videos(playlist_id)
+    except Exception as exc:  # the playlist's discovery failure is isolated
+        repo.rollback()
+        logger.warning("playlist discovery failed for %s: %s", playlist_id, exc)
+        failures.append(RunFailure(scope=playlist_id, error=str(exc)))
+        return
+
+    # Dedup against everything already known (video/candidate/admission), plus what
+    # this run just processed, so a one-off video is processed exactly once.
+    known = repo.known_video_ids() | processed
+    for video_id in discovered:
+        if video_id in known:
+            continue  # already known in some form — skip (idempotent)
+        try:
+            _process_video(
+                video_id,
+                content_source=content_source,
+                transcriber=transcriber,
+                summarizer=summarizer,
+                repo=repo,
+                model=model,
+                now=now,
+            )
+        except Exception as exc:  # one video's failure must not abort the run
+            repo.rollback()
+            logger.warning("processing failed for %s: %s", video_id, exc)
+            failures.append(RunFailure(scope=video_id, error=str(exc)))
+            continue
+        processed.add(video_id)
+        known.add(video_id)
+        newly_processed.append(video_id)
 
 
 def _process_video(

@@ -245,6 +245,18 @@ def webapp_base_url() -> str:
     return os.environ.get("WEBAPP_BASE_URL", "").rstrip("/")
 
 
+def process_me_playlist_id() -> str:
+    """The unlisted "Process me" playlist whose videos are ingested one-off (issue #69).
+
+    Optional: unset (the default, an empty string) means no playlist is read and the
+    daily job behaves exactly as before. When set, the daily job also reads this
+    playlist's public RSS feed each tick and feeds any new videos through the same
+    transcribe → summarize → Candidate path as watched Creators — without subscribing
+    to their Creators (they are recorded for attribution only).
+    """
+    return os.environ.get("PROCESS_ME_PLAYLIST_ID", "").strip()
+
+
 def digest_enabled() -> bool:
     """Whether the daily Digest email is sent at all (ADR-0007).
 
@@ -287,6 +299,9 @@ class Config:
     embedding_model: str
     concept_merge_distance: float
     webapp_base_url: str
+    # The unlisted "Process me" playlist for one-off ingestion (issue #69); empty
+    # when unset, in which case the daily job reads no playlist.
+    process_me_playlist_id: str
     digest_enabled: bool
     # Resend — present only when the Digest is enabled.
     resend_api_key: str
@@ -323,6 +338,7 @@ class Config:
             embedding_model=embedding_model(),
             concept_merge_distance=concept_merge_distance(),
             webapp_base_url=webapp_base_url(),
+            process_me_playlist_id=process_me_playlist_id(),
             digest_enabled=enabled,
             resend_api_key=_require("RESEND_API_KEY") if enabled else "",
             digest_from=_require("DIGEST_FROM") if enabled else "",

@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS creators (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- The watch-list flag (issue #69): a *subscribed* Creator is one the owner added
+-- and the daily job polls; an *unsubscribed* one exists only to attribute a one-off
+-- "Process me" playlist video (its Claims still count toward Strength at the default
+-- trust-tier), and is never polled or backfilled. Defaults TRUE so every Creator that
+-- predates this column stays on the watch list; `list_creators()` and `/api/creators`
+-- read only subscribed Creators. Idempotent add for a database created before #69.
+ALTER TABLE creators ADD COLUMN IF NOT EXISTS subscribed BOOLEAN NOT NULL DEFAULT TRUE;
+
 -- A backfill Candidate: a back-catalogue video known only by metadata, awaiting
 -- the owner's approval into the Body of Knowledge (CONTEXT.md, ADR-0004). Seeded
 -- when a Creator is added (issue #7). Deliberately holds no Transcript or Summary
