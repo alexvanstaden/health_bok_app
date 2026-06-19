@@ -70,16 +70,49 @@ export const PROCESSING_STATUSES: ProcessingStatus[] = [
   "failed",
 ];
 
-// Encode a processing-status filter as repeated `status=` params (`?status=a&status=b`),
-// which FastAPI reads as a list. An empty selection yields no params — the full queue.
-function statusParams(statuses: ProcessingStatus[] = []): string {
-  return statuses.map((s) => `status=${encodeURIComponent(s)}`).join("&");
+// The full set of queue filter dimensions both review queues share (issues #75, #76),
+// AND-composed server-side. Every field is optional; an empty `QueueFilters` returns
+// the full queue. `creators` holds channel_ids (from `/api/creators`); the date bounds
+// are `YYYY-MM-DD` strings, inclusive on both ends; `search` is a free-text term
+// matched against title + creator name + description (the Summary on the Review queue).
+export type QueueFilters = {
+  statuses?: ProcessingStatus[];
+  creators?: string[];
+  publishedFrom?: string;
+  publishedTo?: string;
+  search?: string;
+};
+
+// Whether any filter dimension is set — drives the queues' "no matches" vs. "empty
+// queue" empty state, so the owner can tell a filtered-to-nothing queue from a
+// genuinely empty one.
+export function hasActiveFilters(filters: QueueFilters = {}): boolean {
+  return (
+    (filters.statuses?.length ?? 0) > 0 ||
+    (filters.creators?.length ?? 0) > 0 ||
+    !!filters.publishedFrom ||
+    !!filters.publishedTo ||
+    !!filters.search?.trim()
+  );
+}
+
+// Encode the filters as query params: repeatable `status=`/`creator=` (FastAPI reads
+// each as a list), plus single `published_from`/`published_to`/`q`. Absent or empty
+// dimensions contribute nothing, so the unfiltered queue is a bare path.
+function queueParams(filters: QueueFilters = {}): string {
+  const parts: string[] = [];
+  for (const s of filters.statuses ?? []) parts.push(`status=${encodeURIComponent(s)}`);
+  for (const c of filters.creators ?? []) parts.push(`creator=${encodeURIComponent(c)}`);
+  if (filters.publishedFrom) parts.push(`published_from=${encodeURIComponent(filters.publishedFrom)}`);
+  if (filters.publishedTo) parts.push(`published_to=${encodeURIComponent(filters.publishedTo)}`);
+  if (filters.search?.trim()) parts.push(`q=${encodeURIComponent(filters.search.trim())}`);
+  return parts.join("&");
 }
 
 export function listCandidates(
-  statuses: ProcessingStatus[] = [],
+  filters: QueueFilters = {},
 ): Promise<{ candidates: Candidate[] }> {
-  const params = statusParams(statuses);
+  const params = queueParams(filters);
   return json(`/api/candidates${params ? `?${params}` : ""}`);
 }
 
@@ -165,10 +198,10 @@ export type BackfillOrder = "newest" | "oldest";
 
 export function listBackfillCandidates(
   order: BackfillOrder = "newest",
-  statuses: ProcessingStatus[] = [],
+  filters: QueueFilters = {},
 ): Promise<{ candidates: BackfillCandidate[] }> {
-  const status = statusParams(statuses);
-  return json(`/api/backfill?order=${order}${status ? `&${status}` : ""}`);
+  const params = queueParams(filters);
+  return json(`/api/backfill?order=${order}${params ? `&${params}` : ""}`);
 }
 
 // Lazily fetch one Candidate's real description + accurate publish date (issue #31):

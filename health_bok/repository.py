@@ -68,6 +68,48 @@ def _queue_states(statuses: Sequence[str] | None) -> tuple[str, ...]:
     return chosen or QUEUE_STATES
 
 
+def _queue_filters(
+    *,
+    creator_col: str,
+    published_col: str,
+    text_cols: Sequence[str],
+    creators: Sequence[str] | None,
+    published_from: datetime | None,
+    published_to: datetime | None,
+    search: str | None,
+) -> tuple[str, list[object]]:
+    """Build the creator / date-range / free-text clauses both queue listings share
+    (issue #76), AND-composed and each independently optional.
+
+    Returns an SQL fragment — each clause prefixed with ` AND `, ready to splice
+    after the queue-state IN-list — and its ordered params. The column expressions
+    are caller-supplied (the trusted `v.`/`c.`/`cr.` aliases of each query), never
+    caller input, so interpolating them is safe; every *value* flows through a `%s`
+    placeholder. Omitting every dimension yields an empty fragment and no params, so
+    the query reduces to the unfiltered listing. Free-text matches case-insensitively
+    (ILIKE) against any of `text_cols` — the per-queue title / creator / description
+    columns — so one term spans all three (issue #76).
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+    if creators:
+        placeholders = ", ".join(["%s"] * len(creators))
+        clauses.append(f" AND {creator_col} IN ({placeholders})")
+        params.extend(creators)
+    if published_from is not None:
+        clauses.append(f" AND {published_col} >= %s")
+        params.append(published_from)
+    if published_to is not None:
+        clauses.append(f" AND {published_col} <= %s")
+        params.append(published_to)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        ors = " OR ".join(f"{col} ILIKE %s" for col in text_cols)
+        clauses.append(f" AND ({ors})")
+        params.extend([term] * len(text_cols))
+    return "".join(clauses), params
+
+
 @dataclass(frozen=True)
 class ArchivedSummary:
     """A persisted Summary, read back for assembling the Digest."""
@@ -860,7 +902,14 @@ class Repository:
             ]
 
     def list_backfill_candidates(
-        self, *, newest_first: bool = True, statuses: Sequence[str] | None = None
+        self,
+        *,
+        newest_first: bool = True,
+        statuses: Sequence[str] | None = None,
+        creators: Sequence[str] | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        search: str | None = None,
     ) -> list[StoredCandidate]:
         """Backfill Candidates awaiting the owner's decision, sorted by publish date.
 
@@ -877,10 +926,25 @@ class Repository:
 
         `statuses` narrows the queue to one or more processing states (issue #75);
         omitting it (or passing an empty selection) lists every queue state.
+
+        `creators` (channel_ids), `published_from`/`published_to` (a `published_at`
+        range), and `search` (a free-text term over title + creator name +
+        description) narrow further (issue #76). Every dimension is optional and they
+        AND together, so the queue is the intersection; omitting all reproduces the
+        status-filtered listing.
         """
         direction = "DESC" if newest_first else "ASC"
         states = _queue_states(statuses)
         placeholders = ", ".join(["%s"] * len(states))
+        extra_sql, extra_params = _queue_filters(
+            creator_col="cr.channel_id",
+            published_col="c.published_at",
+            text_cols=("c.title", "cr.name", "c.description"),
+            creators=creators,
+            published_from=published_from,
+            published_to=published_to,
+            search=search,
+        )
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT c.video_id, cr.channel_id, c.title, c.description, c.url, "
@@ -888,9 +952,9 @@ class Repository:
                 "FROM candidates c "
                 "JOIN creators cr ON cr.id = c.creator_id "
                 "LEFT JOIN admissions a ON a.video_id = c.video_id "
-                f"WHERE COALESCE(a.state, %s) IN ({placeholders}) "
+                f"WHERE COALESCE(a.state, %s) IN ({placeholders}){extra_sql} "
                 f"ORDER BY c.published_at {direction}, c.video_id",
-                (CANDIDATE, CANDIDATE, *states),
+                (CANDIDATE, CANDIDATE, *states, *extra_params),
             )
             return [
                 StoredCandidate(
@@ -1190,7 +1254,13 @@ class Repository:
     # -- review queue (reads) ------------------------------------------------
 
     def list_daily_candidates(
-        self, *, statuses: Sequence[str] | None = None
+        self,
+        *,
+        statuses: Sequence[str] | None = None,
+        creators: Sequence[str] | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        search: str | None = None,
     ) -> list[DailyCandidate]:
         """Daily Candidates awaiting the owner's decision, newest published first.
 
@@ -1202,9 +1272,24 @@ class Repository:
 
         `statuses` narrows the queue to one or more processing states (issue #75);
         omitting it (or passing an empty selection) lists every queue state.
+
+        `creators` (channel_ids), `published_from`/`published_to` (a `published_at`
+        range), and `search` (a free-text term over title + creator name + the
+        Summary body — the daily queue's stand-in for a description) narrow further
+        (issue #76). Every dimension is optional and they AND together; omitting all
+        reproduces the status-filtered listing.
         """
         states = _queue_states(statuses)
         placeholders = ", ".join(["%s"] * len(states))
+        extra_sql, extra_params = _queue_filters(
+            creator_col="cr.channel_id",
+            published_col="v.published_at",
+            text_cols=("v.title", "cr.name", "s.body"),
+            creators=creators,
+            published_from=published_from,
+            published_to=published_to,
+            search=search,
+        )
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT v.video_id, v.title, v.url, "
@@ -1217,9 +1302,9 @@ class Repository:
                 "  ORDER BY s.created_at DESC, s.id DESC LIMIT 1"
                 ") s ON TRUE "
                 "LEFT JOIN admissions a ON a.video_id = v.video_id "
-                f"WHERE COALESCE(a.state, %s) IN ({placeholders}) "
+                f"WHERE COALESCE(a.state, %s) IN ({placeholders}){extra_sql} "
                 "ORDER BY v.published_at DESC, v.video_id",
-                (CANDIDATE, CANDIDATE, *states),
+                (CANDIDATE, CANDIDATE, *states, *extra_params),
             )
             return [
                 DailyCandidate(
