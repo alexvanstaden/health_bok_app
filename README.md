@@ -172,7 +172,7 @@ health_bok/
 ├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle + forward Impact + relationship pass
 ├── api.py           FastAPI HTTP API the Web App calls: review · BoK · personal · query · Impacts
 ├── reprocess.py     one-off backfill: re-establish lateral Relationships across the existing library (#64)
-├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `reprocess-relationships` · `creators …`
+├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `reprocess-relationships` · `hierarchy …` · `creators …`
 └── adapters/        youtube · whisper · claude · resend · extractor · embedder · answerer · stance
 
 web/                 the Next.js Web App — review queue, BoK browser, personal layer, Ask, Impacts, Logs
@@ -272,6 +272,36 @@ reported and skipped). It is a normal supersede: non-protected Claims are regene
 owner-edited (protected) Claims are left untouched. The run is **resumable and
 idempotent** — it commits per video, skips videos a prior run already finished, and a
 second run is a no-op, so it is safe to re-run after an interruption.
+
+**Backfill the `broader-of` taxonomy via a CSV round-trip** (a one-off, issue #65).
+The `broader-of` hierarchy is owner-curated: the system *proposes* broader parents and
+the owner *confirms* (ADR-0013). The pre-existing catalogue has no proposals yet, and
+there is no confirm screen, so curation happens through an editable file in three steps:
+
+```bash
+health-bok hierarchy propose                 # needs OPENAI_API_KEY (+ ANTHROPIC_API_KEY if used)
+health-bok hierarchy export proposals.csv    # DB only — writes the editable CSV
+# …open proposals.csv, fill the `decision` column on each row…
+health-bok hierarchy apply  proposals.csv    # DB only — enacts your decisions
+```
+
+`propose` runs the `HierarchyProposer` over **every** existing Concept and persists each
+suggestion as an **unconfirmed** proposal — only existing Concepts, never self/an
+existing parent/a descendant, and a pair that would close a cycle is reported and
+skipped. `export` writes those proposals to a CSV: one row per proposed edge with the
+narrower/broader names + ids and two owner-editable columns. In each row set `decision`
+to one of:
+
+| `decision` | effect |
+|------------|--------|
+| `confirm`  | confirm the edge — it becomes visible to roll-up |
+| `reject`   | delete the proposed edge |
+| `repick`   | move the edge onto a different broader Concept — put its id in `repick_broader_id` |
+| *(blank)*  | leave the proposal as-is (still unconfirmed, invisible to roll-up) |
+
+`apply` enacts the edited CSV. **No edge is ever auto-confirmed** — confirmation comes
+solely from your CSV. A row that would close a cycle is reported and skipped (never
+fatal), and applying the same CSV twice leaves the taxonomy unchanged (idempotent).
 
 > **Dependency note:** the Web App pins `next@14.2.x` (latest patched). The remaining
 > `npm audit` advisories are Next.js DoS classes fixed only by a major upgrade and a
