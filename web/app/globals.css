@@ -35,10 +35,31 @@ h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
   margin: 1rem 0;
 }
 .card h2 { margin: 0 0 0.25rem; font-size: 1.15rem; }
+.card .meta { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.5rem; }
 .card .summary { color: var(--muted); white-space: pre-wrap; }
 
 .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
+
+/* Candidate admission feedback (issue #71): once Approve is clicked the worker
+   admits in the background, so the queue shows a live indicator instead of a
+   button that looks stuck. */
+.processing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--amber);
+  font-size: 0.9rem;
+}
+.spinner {
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 2px solid var(--amber);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .badge {
   font-size: 0.72rem;

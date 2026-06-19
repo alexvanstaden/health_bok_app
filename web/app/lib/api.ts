@@ -12,6 +12,7 @@ export type Candidate = {
   summary: string;
   state: string;
   published_at: string;
+  creator: string;
 };
 
 export type Claim = {

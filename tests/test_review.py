@@ -50,6 +50,16 @@ def test_plain_candidate_lists_until_acted_on(conn):
     assert queue[0].summary == "Zone 2 explained."
 
 
+def test_candidate_carries_creator_name_for_subtitle(conn):
+    # The review queue shows the Creator name and publish date as subtitles
+    # (issue #71), so the Candidate must carry the Creator's name.
+    repo = Repository(conn)
+    seed_processed_video(repo, video_id=VIDEO_ID, channel_name="Huberman Lab")
+
+    queue = repo.list_daily_candidates()
+    assert queue[0].creator == "Huberman Lab"
+
+
 def _job_count(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM jobs")

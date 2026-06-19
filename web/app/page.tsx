@@ -67,45 +67,63 @@ export default function ReviewQueue() {
         <p className="muted">Nothing to review right now.</p>
       )}
 
-      {candidates.map((c) => (
-        <section key={c.video_id} id={`candidate-${c.video_id}`} className="card">
-          <div className="row">
-            <h2>{c.title}</h2>
-            <span className="spacer" />
-            <span className={`badge ${c.state}`}>{c.state}</span>
-          </div>
-          <p className="summary">{c.summary}</p>
-          <div className="row">
-            <button
-              className="primary"
-              disabled={busy === c.video_id || c.state !== "candidate"}
-              onClick={() => act(c.video_id, approveCandidate)}
-            >
-              Approve
-            </button>
-            {c.state === "failed" && (
-              <button
-                disabled={busy === c.video_id}
-                onClick={() => act(c.video_id, retryCandidate)}
-              >
-                Retry
-              </button>
-            )}
-            <button
-              className="danger"
-              disabled={busy === c.video_id}
-              onClick={() => act(c.video_id, rejectCandidate)}
-            >
-              Reject
-            </button>
-            <span className="spacer" />
-            <a href={`/videos/${c.video_id}/claims`}>View extracted claims →</a>
-            <a href={c.url} target="_blank" rel="noreferrer">
-              Source
-            </a>
-          </div>
-        </section>
-      ))}
+      {candidates.map((c) => {
+        // Approval returns at once; the worker then walks the Candidate
+        // approved → processing → admitted. While that runs we swap the
+        // Approve button for a live indicator so the queue never looks frozen.
+        const admitting = c.state === "approved" || c.state === "processing";
+        return (
+          <section key={c.video_id} id={`candidate-${c.video_id}`} className="card">
+            <div className="row">
+              <h2>{c.title}</h2>
+              <span className="spacer" />
+              <span className={`badge ${c.state}`}>{c.state}</span>
+            </div>
+            <p className="meta muted">
+              {c.creator} · {new Date(c.published_at).toLocaleDateString()}
+            </p>
+            <p className="summary">{c.summary}</p>
+            <div className="row">
+              {c.state === "candidate" && (
+                <button
+                  className="primary"
+                  disabled={busy === c.video_id}
+                  onClick={() => act(c.video_id, approveCandidate)}
+                >
+                  {busy === c.video_id ? "Approving…" : "Approve"}
+                </button>
+              )}
+              {c.state === "failed" && (
+                <button
+                  disabled={busy === c.video_id}
+                  onClick={() => act(c.video_id, retryCandidate)}
+                >
+                  Retry
+                </button>
+              )}
+              {admitting ? (
+                <span className="processing" role="status" aria-live="polite">
+                  <span className="spinner" aria-hidden="true" />
+                  Admitting to the Body of Knowledge…
+                </span>
+              ) : (
+                <button
+                  className="danger"
+                  disabled={busy === c.video_id}
+                  onClick={() => act(c.video_id, rejectCandidate)}
+                >
+                  Reject
+                </button>
+              )}
+              <span className="spacer" />
+              <a href={`/videos/${c.video_id}/claims`}>View extracted claims →</a>
+              <a href={c.url} target="_blank" rel="noreferrer">
+                Source
+              </a>
+            </div>
+          </section>
+        );
+      })}
     </>
   );
 }

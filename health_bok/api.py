@@ -175,6 +175,7 @@ def list_candidates() -> dict:
                 "summary": c.summary,
                 "state": c.state,
                 "published_at": c.published_at.isoformat(),
+                "creator": c.creator,
             }
             for c in candidates
         ]

@@ -43,8 +43,9 @@ The primary interface. It loads over Tailscale with **no login** — the tailnet
 boundary. In it you:
 
 - **Review and approve Candidates.** Each new upload — and each backfilled back-catalogue
-  item — appears as a Candidate with its Summary. Approving it enqueues a background job and
-  returns immediately; the worker walks the Candidate `approved → processing → admitted`.
+  item — appears as a Candidate with its Summary, captioned by its Creator and publish date.
+  Approving it enqueues a background job and returns immediately; the queue then shows a live
+  indicator as the worker walks the Candidate `approved → processing → admitted`.
 - **Build the Body of Knowledge through extraction.** The worker extracts **Claims** and
   **Protocols** precision-first (scope qualifiers preserved; grounded-or-dropped with
   locator deep-links back to the moment asserted; Protocols only when structured —

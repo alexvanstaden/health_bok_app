@@ -69,6 +69,7 @@ class DailyCandidate:
     summary: str
     state: str
     published_at: datetime
+    creator: str
 
 
 @dataclass(frozen=True)
@@ -1172,8 +1173,10 @@ class Repository:
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT v.video_id, v.title, v.url, "
-                "       COALESCE(a.state, %s) AS state, v.published_at, s.body "
+                "       COALESCE(a.state, %s) AS state, v.published_at, s.body, "
+                "       cr.name "
                 "FROM videos v "
+                "JOIN creators cr ON cr.id = v.creator_id "
                 "JOIN LATERAL ("
                 "  SELECT body FROM summaries s WHERE s.video_id = v.video_id "
                 "  ORDER BY s.created_at DESC, s.id DESC LIMIT 1"
@@ -1192,6 +1195,7 @@ class Repository:
                     state=r[3],
                     published_at=r[4],
                     summary=r[5],
+                    creator=r[6],
                 )
                 for r in cur.fetchall()
             ]
