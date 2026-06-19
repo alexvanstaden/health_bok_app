@@ -16,6 +16,11 @@ product surface — the Web App is the product, ADR-0009):
     re-extracts every already-admitted video from its archived Transcript through
     the supersede path so the pre-existing library gains lateral Relationships. No
     YouTube/Whisper; resumable and idempotent. Needs the LLM + DB secrets.
+  * ``health-bok hierarchy propose|export|apply`` is the no-UI curation round-trip
+    for the owner-curated `broader-of` taxonomy (issue #65): propose broader parents
+    across the existing catalogue, export them to a CSV the owner edits, and apply the
+    edited CSV (confirm/reject/repick). `propose` needs the LLM + DB secrets;
+    `export`/`apply` need only the DB.
 
 Creator management needs only ``DATABASE_URL`` plus the YouTube adapter, so it
 never requires the Digest or LLM secrets to be set.
@@ -28,9 +33,10 @@ import logging
 import sys
 import time
 
-from . import config, creators, llm
+from . import config, creators, hierarchy_backfill, llm
 from .adapters.embedder import OpenAIEmbedder
 from .adapters.extractor import ChatExtractor
+from .adapters.hierarchy_proposer import ChatHierarchyProposer
 from .adapters.resend import ResendDigestSender
 from .adapters.stance import ChatStanceJudge
 from .adapters.summarize import ChatSummarizer
@@ -82,6 +88,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-establish lateral Relationships across the existing library (#64).",
     )
     reprocess_p.set_defaults(handler=_cmd_reprocess_relationships)
+
+    hierarchy_p = sub.add_parser(
+        "hierarchy", help="Curate the broader-of taxonomy via a CSV round-trip (#65)."
+    )
+    hierarchy_p.set_defaults(
+        handler=lambda a: hierarchy_p.error("a subcommand is required")
+    )
+    hsub = hierarchy_p.add_subparsers()
+
+    propose_p = hsub.add_parser(
+        "propose", help="Propose broader-of parents across every existing Concept."
+    )
+    propose_p.set_defaults(handler=_cmd_hierarchy_propose)
+
+    export_p = hsub.add_parser(
+        "export", help="Export the current proposals to a CSV the owner edits."
+    )
+    export_p.add_argument("path", help="Where to write the proposals CSV.")
+    export_p.set_defaults(handler=_cmd_hierarchy_export)
+
+    apply_p = hsub.add_parser(
+        "apply", help="Apply an edited proposals CSV (confirm/reject/repick)."
+    )
+    apply_p.add_argument("path", help="The edited proposals CSV to apply.")
+    apply_p.set_defaults(handler=_cmd_hierarchy_apply)
 
     creators_p = sub.add_parser("creators", help="Manage the watched Creators.")
     creators_p.set_defaults(handler=lambda a: creators_p.error("a subcommand is required"))
@@ -229,6 +260,67 @@ def _cmd_reprocess_relationships(_args: argparse.Namespace) -> int:
     for video_id, error in result.failed:
         logger.warning("reprocess failure: %s -> %s", video_id, error)
     return 1 if result.failed else 0
+
+
+def _cmd_hierarchy_propose(_args: argparse.Namespace) -> int:
+    """Propose broader-of parents across the existing catalogue (issue #65).
+
+    Builds the real HierarchyProposer (on the configured LLM provider, ADR-0012) and
+    the Embedder its pgvector retrieval needs, then persists every suggestion as an
+    *unconfirmed* proposal. Idempotent — safe to re-run. Needs the LLM + DB secrets.
+    """
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        result = hierarchy_backfill.propose_all(
+            proposer=ChatHierarchyProposer(
+                llm.chat_model(config.hierarchy_proposal_model())
+            ),
+            embedder=OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            repo=repo,
+            model=config.embedding_model(),
+        )
+    finally:
+        conn.close()
+    logger.info(
+        "hierarchy propose done: scanned=%d proposed=%d skipped_cycle=%d",
+        result.concepts_scanned, len(result.proposed), len(result.skipped_cycle),
+    )
+    return 0
+
+
+def _cmd_hierarchy_export(args: argparse.Namespace) -> int:
+    """Write the current proposals to a CSV the owner edits (issue #65). DB only."""
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        with open(args.path, "w", newline="", encoding="utf-8") as out:
+            count = hierarchy_backfill.export_proposals(repo, out=out)
+    finally:
+        conn.close()
+    logger.info("hierarchy export done: wrote %d proposal(s) to %s", count, args.path)
+    return 0
+
+
+def _cmd_hierarchy_apply(args: argparse.Namespace) -> int:
+    """Apply an edited proposals CSV — confirm/reject/repick (issue #65). DB only."""
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        with open(args.path, newline="", encoding="utf-8") as source:
+            result = hierarchy_backfill.apply_decisions(repo, source=source)
+    finally:
+        conn.close()
+    logger.info(
+        "hierarchy apply done: confirmed=%d rejected=%d repicked=%d "
+        "skipped_cycle=%d skipped_missing=%d unchanged=%d",
+        len(result.confirmed), len(result.rejected), len(result.repicked),
+        len(result.skipped_cycle), len(result.skipped_missing), result.unchanged,
+    )
+    return 0
 
 
 def _cmd_creator_add(args: argparse.Namespace) -> int:
