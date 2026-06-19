@@ -56,7 +56,11 @@ export default function LogsPage() {
             <span className="muted">{formatDate(v.added_at)}</span>
           </div>
           <div className="meta">{v.creator}</div>
-          <div className="meta">{v.summary}</div>
+          {v.summary ? (
+            <div className="meta">{v.summary}</div>
+          ) : (
+            <div className="meta muted">No summary</div>
+          )}
         </a>
       ))}
     </>
