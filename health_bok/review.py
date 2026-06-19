@@ -77,6 +77,23 @@ def bulk_reject(video_ids: list[str], *, repo: Repository) -> int:
     return rejected
 
 
+def bulk_approve(video_ids: list[str], *, repo: Repository) -> int:
+    """Approve many Candidates at once and return how many were newly approved.
+
+    The owner's bulk "admit all of these" gesture over the backfill queue (issue #73):
+    every selected Candidate is approved with the same rule as `approve_candidate`, so
+    one already approved, processing, or admitted is skipped rather than re-enqueued
+    (ADR-0004, ADR-0010). Each fresh approval enqueues exactly one admission job, which
+    the worker carries through transcribe-if-needed → extract → admit, identical to a
+    daily Candidate.
+    """
+    approved = 0
+    for video_id in video_ids:
+        if approve_candidate(video_id, repo=repo):
+            approved += 1
+    return approved
+
+
 def retry_candidate(video_id: str, *, repo: Repository) -> bool:
     """Re-enqueue a Candidate whose extraction failed (ADR-0010).
 

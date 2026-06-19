@@ -192,6 +192,39 @@ def test_bulk_reject_removes_candidates_and_they_do_not_resurface(conn):
     assert [c.video_id for c in Repository(conn).list_backfill_candidates()] == ["keep"]
 
 
+# == Bulk-approve ===========================================================
+
+
+def test_bulk_approve_enqueues_each_and_skips_in_flight(conn):
+    repo = Repository(conn)
+    creator_id = repo.add_creator(HUBERMAN)
+    for vid in ("a", "b", "c"):
+        repo.add_candidate(creator_id, _metadata(vid))
+    repo.commit()
+
+    # "a" is already approved (e.g. via per-video Approve); bulk-approving the
+    # selection enqueues "b" and "c" but skips the in-flight "a" (issue #73).
+    review.approve_candidate("a", repo=repo)
+    approved = review.bulk_approve(["a", "b", "c"], repo=repo)
+    assert approved == 2
+
+    # All three are now approved, with exactly one admission job each — no duplicate
+    # for "a" (ADR-0004, ADR-0010).
+    repo = Repository(conn)
+    assert {c.video_id: c.state for c in repo.list_backfill_candidates()} == {
+        "a": "approved",
+        "b": "approved",
+        "c": "approved",
+    }
+    assert _job_count(conn) == 3
+
+
+def _job_count(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM jobs")
+        return cur.fetchone()[0]
+
+
 # == Approve → transcribe-if-needed → extract → admit =======================
 
 
