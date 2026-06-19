@@ -66,8 +66,12 @@ def backfill_creator(
     as metadata-only Candidates (idempotent on video_id), then commits. Returns the
     video IDs newly stored this run, or ``None`` if no Creator with that channel_id
     is on the watch list, so the caller can answer 404.
+
+    Resolves only *subscribed* Creators (issue #69): a one-off "Process me" Creator
+    is never on the watch list, so it is treated as absent here and is never
+    backfilled, matching its exclusion from the daily poll.
     """
-    creator_id = repo.creator_id(channel_id)
+    creator_id = repo.creator_id(channel_id, subscribed_only=True)
     if creator_id is None:
         return None
     stored = backfill_candidates(

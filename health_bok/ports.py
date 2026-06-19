@@ -55,6 +55,17 @@ class ContentSource(Protocol):
         """
         ...
 
+    def discover_playlist_videos(self, playlist_id: str) -> list[str]:
+        """Return a playlist's recent video IDs, newest first (issue #69).
+
+        The one-off "Process me" ingestion source: the unlisted playlist's public
+        RSS feed, read with no auth, exactly like `discover_videos` reads a channel's.
+        The daily job diffs these against everything already known and drives the new
+        ones through the same spine as watched-Creator uploads. Raises on a feed it
+        cannot reach, so the playlist's failure is isolated like a single Creator's.
+        """
+        ...
+
     def list_backcatalogue(self, channel_id: str) -> list[CandidateMetadata]:
         """List the Creator's whole back-catalogue as metadata-only Candidates.
 

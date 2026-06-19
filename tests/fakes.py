@@ -44,10 +44,13 @@ class FakeContentSource:
       first, unfiltered, so the backfill caller (not the fake) honors the cutoff.
     * `details` maps a video_id to the CandidateDetails its lazy per-video detail
       fetch returns (issue #31) — the real description + accurate publish date.
+    * `playlists` maps a playlist_id to the video IDs its RSS feed returns, newest
+      first — the one-off "Process me" ingestion source (issue #69). An `errors`
+      entry keyed by a playlist_id makes that playlist's discovery raise.
 
-    Calls are recorded (`discovered`, `fetched_video_ids`, `audio_fetched`,
-    `resolved`, `listed`, `details_fetched`) so tests can assert what the job did
-    and did not touch.
+    Calls are recorded (`discovered`, `discovered_playlists`, `fetched_video_ids`,
+    `audio_fetched`, `resolved`, `listed`, `details_fetched`) so tests can assert
+    what the job did and did not touch.
     """
 
     def __init__(
@@ -60,6 +63,7 @@ class FakeContentSource:
         errors: dict[str, Exception] | None = None,
         backcatalogue: dict[str, list[CandidateMetadata]] | None = None,
         details: dict[str, CandidateDetails] | None = None,
+        playlists: dict[str, list[str]] | None = None,
     ):
         self._transcript = transcript
         self._transcripts = dict(transcripts or {})
@@ -69,9 +73,11 @@ class FakeContentSource:
         self._identities = dict(identities or {})
         self._backcatalogue = dict(backcatalogue or {})
         self._details = dict(details or {})
+        self._playlists = dict(playlists or {})
         self.fetched_video_ids: list[str] = []
         self.audio_fetched: list[str] = []
         self.discovered: list[str] = []
+        self.discovered_playlists: list[str] = []
         self.resolved: list[str] = []
         self.listed: list[str] = []
         self.details_fetched: list[str] = []
@@ -88,6 +94,12 @@ class FakeContentSource:
         if channel_id in self._errors:
             raise self._errors[channel_id]
         return list(self._feeds.get(channel_id, []))
+
+    def discover_playlist_videos(self, playlist_id: str) -> list[str]:
+        self.discovered_playlists.append(playlist_id)
+        if playlist_id in self._errors:
+            raise self._errors[playlist_id]
+        return list(self._playlists.get(playlist_id, []))
 
     def list_backcatalogue(self, channel_id: str) -> list[CandidateMetadata]:
         self.listed.append(channel_id)

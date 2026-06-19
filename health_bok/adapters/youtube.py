@@ -32,6 +32,9 @@ YOUTUBE_BASE = "https://www.youtube.com"
 # YouTube publishes each channel's latest uploads as an Atom feed keyed by the
 # stable channel_id — keyless and free, exactly what the daily diff needs.
 RSS_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id="
+# The same keyless Atom feed, keyed by playlist_id, backs one-off "Process me"
+# ingestion (issue #69): identical shape to the channel feed, different query key.
+PLAYLIST_FEED = "https://www.youtube.com/feeds/videos.xml?playlist_id="
 _FEED_NS = {
     "atom": "http://www.w3.org/2005/Atom",
     "yt": "http://www.youtube.com/xml/schemas/2015",
@@ -74,7 +77,19 @@ class YouTubeContentSource:
         # Parse the channel's Atom upload feed with the stdlib — no API key, no
         # quota, no third-party SDK. Returns the latest video IDs newest-first;
         # the daily job diffs them against the already-processed set.
-        url = f"{RSS_FEED}{channel_id}"
+        return self._feed_video_ids(f"{RSS_FEED}{channel_id}")
+
+    def discover_playlist_videos(self, playlist_id: str) -> list[str]:
+        # The "Process me" one-off ingestion source (issue #69): the unlisted
+        # playlist's public Atom feed, read with no auth, same shape as a channel's.
+        # Returns the latest video IDs newest-first for the daily diff. YouTube's
+        # feed surfaces only the ~15 most-recent items, so bulk-adding more than that
+        # between polls can miss the oldest — documented, with no mitigation needed.
+        return self._feed_video_ids(f"{PLAYLIST_FEED}{playlist_id}")
+
+    def _feed_video_ids(self, url: str) -> list[str]:
+        # Shared Atom-feed parse for the channel and playlist discovery feeds, which
+        # are byte-for-byte the same format keyed by a different query parameter.
         request = urllib.request.Request(url, headers={"User-Agent": "health-bok"})
         with urllib.request.urlopen(request, timeout=_FEED_TIMEOUT) as response:
             feed = response.read()

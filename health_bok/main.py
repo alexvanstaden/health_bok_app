@@ -160,6 +160,9 @@ def _cmd_run(_args: argparse.Namespace) -> int:
             model=cfg.summary_model,
             send_digest=cfg.digest_enabled,
             webapp_base_url=cfg.webapp_base_url,
+            # Also ingest the one-off "Process me" playlist when configured (issue
+            # #69); empty means no playlist is read and the run is unchanged.
+            process_me_playlist_id=cfg.process_me_playlist_id,
         )
     finally:
         conn.close()

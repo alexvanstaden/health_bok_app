@@ -775,25 +775,34 @@ class Repository:
     # -- reads ---------------------------------------------------------------
 
     def list_creators(self) -> list[CreatorIdentity]:
-        """Return every watched Creator's stable identity, oldest first.
+        """Return every *subscribed* Creator's stable identity, oldest first.
 
         This is the watch list the daily job reads to know whom to poll
-        (PRD #1, user story 5).
+        (PRD #1, user story 5). Unsubscribed one-off Creators — created only to
+        attribute a "Process me" playlist video (issue #69) — are excluded, so they
+        are never polled and never surface in `/api/creators`.
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT channel_id, name FROM creators ORDER BY created_at, id"
+                "SELECT channel_id, name FROM creators "
+                "WHERE subscribed ORDER BY created_at, id"
             )
             return [CreatorIdentity(channel_id=r[0], name=r[1]) for r in cur.fetchall()]
 
-    def creator_id(self, channel_id: str) -> int | None:
-        """The internal id of a watched Creator by its stable channel_id, or None.
+    def creator_id(self, channel_id: str, *, subscribed_only: bool = False) -> int | None:
+        """The internal id of a Creator by its stable channel_id, or None.
 
         Lets a Web App backfill trigger re-run population for one Creator without
-        re-resolving its @handle (issue #15).
+        re-resolving its @handle (issue #15). Pass `subscribed_only=True` to resolve
+        only watch-list Creators, so a one-off Creator (issue #69) is treated as
+        absent and is never backfilled; the default resolves any Creator (e.g. for
+        trust-tiering, which applies to one-off Creators too).
         """
+        sql = "SELECT id FROM creators WHERE channel_id = %s"
+        if subscribed_only:
+            sql += " AND subscribed"
         with self._conn.cursor() as cur:
-            cur.execute("SELECT id FROM creators WHERE channel_id = %s", (channel_id,))
+            cur.execute(sql, (channel_id,))
             row = cur.fetchone()
         return row[0] if row else None
 
@@ -913,6 +922,25 @@ class Repository:
             )
             return {row[0] for row in cur.fetchall()}
 
+    def known_video_ids(self) -> set[str]:
+        """Every external video_id the system already knows in *any* form — an
+        archived/processing video, a backfill Candidate, or an admission-lifecycle row.
+
+        The "Process me" playlist dedup set (issue #69): a one-off video already known
+        as a video, a Candidate, or an admission is skipped, so re-running the job
+        never reprocesses and a playlist video that overlaps a watched Creator's
+        catalogue is never duplicated. Broader than `processed_video_ids()` — which is
+        only the daily-diff set of fully-summarized videos — because a one-off video
+        must also defer to metadata-only Candidates and to videos still in flight.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT video_id FROM videos "
+                "UNION SELECT video_id FROM candidates "
+                "UNION SELECT video_id FROM admissions"
+            )
+            return {row[0] for row in cur.fetchall()}
+
     def unsent_summaries(self) -> list[ArchivedSummary]:
         """Every processed video whose Summary has not yet gone out in a Digest.
 
@@ -971,19 +999,33 @@ class Repository:
 
     # -- writes --------------------------------------------------------------
 
-    def add_creator(self, identity: CreatorIdentity) -> int:
+    def add_creator(self, identity: CreatorIdentity, *, subscribed: bool = True) -> int:
         """Persist a Creator by stable identity; idempotent on channel_id.
 
         Re-adding an existing Creator refreshes its display name but never
         creates a duplicate (PRD #1, user stories 3-4). Like the other writes,
         this does not commit — the caller owns the transaction boundary.
+
+        `subscribed` applies only when the Creator is first inserted (issue #69):
+        an explicit watch-list add (the default, `True`) also *promotes* an existing
+        one-off Creator onto the watch list, while the archiving upsert
+        (`subscribed=False`) creates a new one-off Creator not-subscribed and leaves
+        an existing Creator's flag untouched — so processing a one-off video never
+        un-subscribes a watched Creator.
         """
+        # On conflict the watch-list add re-asserts `subscribed = TRUE` (promotion);
+        # the one-off path updates only the name, never touching the flag.
+        on_conflict = (
+            "ON CONFLICT (channel_id) DO UPDATE SET name = EXCLUDED.name, subscribed = TRUE"
+            if subscribed
+            else "ON CONFLICT (channel_id) DO UPDATE SET name = EXCLUDED.name"
+        )
         with self._conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO creators (channel_id, name) VALUES (%s, %s) "
-                "ON CONFLICT (channel_id) DO UPDATE SET name = EXCLUDED.name "
-                "RETURNING id",
-                (identity.channel_id, identity.name),
+                "INSERT INTO creators (channel_id, name, subscribed) VALUES (%s, %s, %s) "
+                + on_conflict
+                + " RETURNING id",
+                (identity.channel_id, identity.name, subscribed),
             )
             return cur.fetchone()[0]
 
@@ -3297,6 +3339,11 @@ class Repository:
     def _upsert_creator(self, prov: Provenance) -> int:
         # A video's provenance carries the same stable identity the watch list
         # stores, so archiving and Creator-management share one upsert path.
+        # Archiving never adds a Creator to the watch list (issue #69): a watched
+        # Creator's row already exists (its flag is left untouched), and a brand-new
+        # Creator here can only come from a one-off "Process me" video — so it is
+        # created not-subscribed.
         return self.add_creator(
-            CreatorIdentity(channel_id=prov.channel_id, name=prov.channel_name)
+            CreatorIdentity(channel_id=prov.channel_id, name=prov.channel_name),
+            subscribed=False,
         )
