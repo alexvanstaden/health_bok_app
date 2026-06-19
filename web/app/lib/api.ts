@@ -57,8 +57,30 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function listCandidates(): Promise<{ candidates: Candidate[] }> {
-  return json("/api/candidates");
+// -- Queue filtering: processing-status (issue #75) -------------------------
+// The shared filter plumbing both review queues follow. A Candidate in either
+// queue sits in one of these lifecycle states; the toolbar lets the owner narrow
+// to a subset, server-side via repeatable `status` query params. Admitted/rejected
+// ones have left the queue, so they are deliberately not selectable.
+export type ProcessingStatus = "candidate" | "approved" | "processing" | "failed";
+export const PROCESSING_STATUSES: ProcessingStatus[] = [
+  "candidate",
+  "approved",
+  "processing",
+  "failed",
+];
+
+// Encode a processing-status filter as repeated `status=` params (`?status=a&status=b`),
+// which FastAPI reads as a list. An empty selection yields no params — the full queue.
+function statusParams(statuses: ProcessingStatus[] = []): string {
+  return statuses.map((s) => `status=${encodeURIComponent(s)}`).join("&");
+}
+
+export function listCandidates(
+  statuses: ProcessingStatus[] = [],
+): Promise<{ candidates: Candidate[] }> {
+  const params = statusParams(statuses);
+  return json(`/api/candidates${params ? `?${params}` : ""}`);
 }
 
 export function approveCandidate(videoId: string) {
@@ -143,8 +165,10 @@ export type BackfillOrder = "newest" | "oldest";
 
 export function listBackfillCandidates(
   order: BackfillOrder = "newest",
+  statuses: ProcessingStatus[] = [],
 ): Promise<{ candidates: BackfillCandidate[] }> {
-  return json(`/api/backfill?order=${order}`);
+  const status = statusParams(statuses);
+  return json(`/api/backfill?order=${order}${status ? `&${status}` : ""}`);
 }
 
 // Lazily fetch one Candidate's real description + accurate publish date (issue #31):

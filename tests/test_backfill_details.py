@@ -165,3 +165,40 @@ def test_backfill_queue_sorts_by_publish_date_both_ways(conn):
 
     oldest_first = Repository(conn).list_backfill_candidates(newest_first=False)
     assert [c.video_id for c in oldest_first] == ["old", "middle", "newest"]
+
+
+# == Filter the queue by processing status (issue #75) ======================
+
+
+def test_backfill_queue_filter_by_processing_status(conn):
+    # The backfill queue narrows to one or more processing states, and the filter
+    # composes with the existing newest/oldest sort (issue #75).
+    repo = Repository(conn)
+    creator_id = repo.add_creator(HUBERMAN)
+    for vid, days_ago in (("plain", 5), ("processing", 40), ("failed", 100)):
+        repo.add_candidate(
+            creator_id,
+            CandidateMetadata(
+                video_id=vid, title=vid, description="", published_at=_at(days_ago)
+            ),
+        )
+    repo.set_admission("processing", "processing")
+    repo.set_admission("failed", "failed")
+    repo.commit()
+
+    def ids(**kw):
+        return {c.video_id for c in Repository(conn).list_backfill_candidates(**kw)}
+
+    # Unfiltered (and the empty selection) lists every queue state.
+    assert ids() == {"plain", "processing", "failed"}
+    assert ids(statuses=[]) == {"plain", "processing", "failed"}
+
+    # A single state narrows; multiple states union.
+    assert ids(statuses=["failed"]) == {"failed"}
+    assert ids(statuses=["candidate", "processing"]) == {"plain", "processing"}
+
+    # Filter composes with sort: oldest-first within the narrowed set.
+    narrowed = Repository(conn).list_backfill_candidates(
+        newest_first=False, statuses=["candidate", "failed"]
+    )
+    assert [c.video_id for c in narrowed] == ["failed", "plain"]
