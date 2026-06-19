@@ -391,12 +391,22 @@ stores both, and shows them in place — the expensive per-video call happens on
 The *Backfill* tab can be **sorted by publish date** (newest- or oldest-first), and the
 ordering sharpens for any Candidate whose details you've fetched.
 
-Both review queues — the daily one and *Backfill* — carry a shared **filter toolbar** that
-narrows the list by **processing status**: tick one or more of `candidate`, `approved`,
-`processing`, or `failed` to show only those, and clear the selection to return to the full
-queue (admitted and rejected Candidates have already left the queue, so they aren't listed).
-The filter is applied server-side and survives the queues' 3-second polling; on *Backfill* it
-composes with the publish-date sort.
+Both review queues — the daily one and *Backfill* — carry a shared **filter & search toolbar**
+that narrows the list along several dimensions, all applied server-side and all surviving the
+queues' 3-second polling:
+
+- **Processing status** — tick one or more of `candidate`, `approved`, `processing`, or
+  `failed` to show only those (admitted and rejected Candidates have already left the queue,
+  so they aren't listed).
+- **Creator** — tick one or more Creators from your watch list to show only their Candidates.
+- **Publish date** — set a from/and-or-to range over each Candidate's publish date.
+- **Free-text search** — one box matches your term against the **title, Creator name, and
+  description**; "description" is the **Summary** on the daily queue and the real **description**
+  on *Backfill*.
+
+The dimensions **combine with AND** — e.g. _Creator = X, published this year, status =
+`failed`, text = "sleep"_ returns the intersection — and **Clear all** empties them to return
+the full queue. On *Backfill* the toolbar also composes with the publish-date sort.
 
 ## One-off videos (the "Process me" playlist)
 

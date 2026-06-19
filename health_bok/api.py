@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, time, timezone
 from typing import Iterator
 
 import psycopg
@@ -90,6 +90,25 @@ def _repo() -> Iterator[Repository]:
         yield Repository(conn)
     finally:
         conn.close()
+
+
+def _parse_date_bound(value: str | None, *, end_of_day: bool) -> datetime | None:
+    """Parse a `YYYY-MM-DD` query bound into a UTC datetime for a publish-date
+    filter (issue #76).
+
+    The toolbar's date control sends calendar dates, so the range is inclusive on
+    both ends: the `from` bound anchors at the start of its day and the `to` bound
+    at the very end of its day. An absent or unparseable value means *no bound*, so
+    a half-open or omitted range simply widens the query rather than erroring.
+    """
+    if not value:
+        return None
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    moment = time.max if end_of_day else time.min
+    return datetime.combine(day, moment, tzinfo=timezone.utc)
 
 
 def _normalizer(repo: Repository) -> ConceptNormalizer:
@@ -164,15 +183,30 @@ def health() -> dict:
 @app.get("/api/candidates")
 def list_candidates(
     status: list[str] | None = Query(default=None),
+    creator: list[str] | None = Query(default=None),
+    published_from: str | None = Query(default=None),
+    published_to: str | None = Query(default=None),
+    q: str | None = Query(default=None),
 ) -> dict:
     """The daily review queue: Candidates with their Summary and state (ADR-0007).
 
     `status` is an optional, repeatable processing-status filter (issue #75) — one
     or more of `candidate`/`approved`/`processing`/`failed`. Omitting it returns the
     full queue; unknown values are ignored server-side.
+
+    `creator` (repeatable channel_ids), `published_from`/`published_to` (`YYYY-MM-DD`
+    bounds on the publish date), and `q` (free-text over title + creator name + the
+    Summary body) narrow further (issue #76). Each is optional and they compose with
+    `status` and each other via AND, so the queue is their intersection.
     """
     with _repo() as repo:
-        candidates = repo.list_daily_candidates(statuses=status)
+        candidates = repo.list_daily_candidates(
+            statuses=status,
+            creators=creator,
+            published_from=_parse_date_bound(published_from, end_of_day=False),
+            published_to=_parse_date_bound(published_to, end_of_day=True),
+            search=q,
+        )
     return {
         "candidates": [
             {
@@ -329,17 +363,31 @@ def _backfill_payload(c) -> dict:
 def list_backfill(
     order: str = "newest",
     status: list[str] | None = Query(default=None),
+    creator: list[str] | None = Query(default=None),
+    published_from: str | None = Query(default=None),
+    published_to: str | None = Query(default=None),
+    q: str | None = Query(default=None),
 ) -> dict:
     """The backfill review queue: metadata-only Candidates awaiting a decision.
 
     `order` sorts by publish date — `newest` (default) or `oldest` (issue #31).
     `status` is an optional, repeatable processing-status filter (issue #75) — one
     or more of `candidate`/`approved`/`processing`/`failed`; omitting it returns the
-    full queue. The filter and sort compose: the queue is narrowed, then ordered.
+    full queue.
+
+    `creator` (repeatable channel_ids), `published_from`/`published_to` (`YYYY-MM-DD`
+    bounds on the publish date), and `q` (free-text over title + creator name +
+    description) narrow further (issue #76). All filters compose with the status
+    filter and each other via AND; the narrowed set is then ordered.
     """
     with _repo() as repo:
         candidates = repo.list_backfill_candidates(
-            newest_first=order != "oldest", statuses=status
+            newest_first=order != "oldest",
+            statuses=status,
+            creators=creator,
+            published_from=_parse_date_bound(published_from, end_of_day=False),
+            published_to=_parse_date_bound(published_to, end_of_day=True),
+            search=q,
         )
     return {"candidates": [_backfill_payload(c) for c in candidates]}
 

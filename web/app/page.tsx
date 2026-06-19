@@ -9,9 +9,12 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Candidate,
-  ProcessingStatus,
+  Creator,
+  QueueFilters,
   approveCandidate,
+  hasActiveFilters,
   listCandidates,
+  listCreators,
   rejectCandidate,
   retryCandidate,
 } from "./lib/api";
@@ -19,16 +22,25 @@ import { QueueToolbar } from "./lib/QueueToolbar";
 
 export default function ReviewQueue() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [statuses, setStatuses] = useState<ProcessingStatus[]>([]);
+  const [filters, setFilters] = useState<QueueFilters>({});
+  const [creators, setCreators] = useState<Creator[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
-  // The filter is server-side: re-fetch on change, and the 3s poll below carries
-  // the active selection (refresh closes over `statuses`), so it never resets.
+  // The creator multi-select is populated from the watch list once on mount; it
+  // rarely changes within a review session, so it needn't ride the 3s poll.
+  useEffect(() => {
+    listCreators()
+      .then(({ creators }) => setCreators(creators))
+      .catch(() => {});
+  }, []);
+
+  // Filters are server-side: re-fetch on change, and the 3s poll below carries the
+  // active selection (refresh closes over `filters`), so it never resets.
   const refresh = useCallback(async () => {
     try {
-      const { candidates } = await listCandidates(statuses);
+      const { candidates } = await listCandidates(filters);
       setCandidates(candidates);
       setError(null);
     } catch (e) {
@@ -36,7 +48,7 @@ export default function ReviewQueue() {
     } finally {
       setLoaded(true);
     }
-  }, [statuses]);
+  }, [filters]);
 
   // Poll so worker-driven state transitions become visible without a reload.
   useEffect(() => {
@@ -67,13 +79,13 @@ export default function ReviewQueue() {
         Daily Candidates awaiting your approval into the Body of Knowledge.
       </p>
 
-      <QueueToolbar statuses={statuses} onChange={setStatuses} />
+      <QueueToolbar filters={filters} onChange={setFilters} creators={creators} />
 
       {error && <p className="error">API error: {error}</p>}
       {loaded && candidates.length === 0 && !error && (
         <p className="muted">
-          {statuses.length > 0
-            ? "No Candidates match this filter."
+          {hasActiveFilters(filters)
+            ? "No Candidates match these filters."
             : "Nothing to review right now."}
         </p>
       )}

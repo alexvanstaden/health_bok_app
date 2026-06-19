@@ -16,11 +16,14 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BackfillCandidate,
   BackfillOrder,
-  ProcessingStatus,
+  Creator,
+  QueueFilters,
   approveBackfillCandidates,
   approveCandidate,
   fetchBackfillDetails,
+  hasActiveFilters,
   listBackfillCandidates,
+  listCreators,
   rejectBackfillCandidates,
 } from "../lib/api";
 import { QueueToolbar } from "../lib/QueueToolbar";
@@ -29,17 +32,25 @@ export default function BackfillQueue() {
   const [candidates, setCandidates] = useState<BackfillCandidate[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [order, setOrder] = useState<BackfillOrder>("newest");
-  const [statuses, setStatuses] = useState<ProcessingStatus[]>([]);
+  const [filters, setFilters] = useState<QueueFilters>({});
+  const [creators, setCreators] = useState<Creator[]>([]);
   const [fetching, setFetching] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  // Filter and sort are both server-side and compose; `refresh` closes over both,
-  // so the 3s poll re-subscribes on either change and preserves the active filter.
+  // The creator multi-select is populated from the watch list once on mount.
+  useEffect(() => {
+    listCreators()
+      .then(({ creators }) => setCreators(creators))
+      .catch(() => {});
+  }, []);
+
+  // Filters and sort are both server-side and compose; `refresh` closes over both,
+  // so the 3s poll re-subscribes on either change and preserves the active filters.
   const refresh = useCallback(async () => {
     try {
-      const { candidates } = await listBackfillCandidates(order, statuses);
+      const { candidates } = await listBackfillCandidates(order, filters);
       setCandidates(candidates);
       setError(null);
     } catch (e) {
@@ -47,7 +58,7 @@ export default function BackfillQueue() {
     } finally {
       setLoaded(true);
     }
-  }, [order, statuses]);
+  }, [order, filters]);
 
   // Poll so worker-driven state transitions (approved → processing → admitted)
   // become visible, and approved/admitted Candidates drop out of the queue.
@@ -174,7 +185,7 @@ export default function BackfillQueue() {
       </div>
 
       {/* The shared filter toolbar, with the queue's own sort slotted alongside. */}
-      <QueueToolbar statuses={statuses} onChange={setStatuses}>
+      <QueueToolbar filters={filters} onChange={setFilters} creators={creators}>
         <label className="muted">
           Sort:{" "}
           <select
@@ -190,8 +201,8 @@ export default function BackfillQueue() {
       {error && <p className="error">API error: {error}</p>}
       {loaded && candidates.length === 0 && !error && (
         <p className="muted">
-          {statuses.length > 0
-            ? "No backfill Candidates match this filter."
+          {hasActiveFilters(filters)
+            ? "No backfill Candidates match these filters."
             : "No backfill Candidates awaiting review. Trigger one from Creators."}
         </p>
       )}
