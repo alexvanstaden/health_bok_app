@@ -1325,6 +1325,13 @@ class Repository:
             )
             row = cur.fetchone()
             if row is None:
+                # End the read-only transaction the SELECT opened: an empty queue
+                # is the common poll, and the worker then sleeps before re-polling.
+                # Without this the `FOR UPDATE` snapshot leaves the connection idle
+                # in transaction, holding a lock on `jobs` that blocks every
+                # service's `init_schema` DDL on its next boot (the API would hang
+                # in startup forever). Committing/rolling back releases it at once.
+                self._conn.rollback()
                 return None
             cur.execute(
                 "UPDATE jobs SET state = 'running', attempts = attempts + 1, "

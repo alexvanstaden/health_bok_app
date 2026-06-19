@@ -55,11 +55,15 @@ services:
         condition: service_healthy
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      # NEXT_PUBLIC_* is baked into the client bundle at build time, so the
+      # browser's API base URL must reach the image as a build arg, not just a
+      # runtime env (a runtime env never re-inlines an already-built bundle).
+      # Rebuild (`docker compose up --build web`) after changing this in .env.
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     restart: unless-stopped
-    environment:
-      # The browser reaches the API over the tailnet; override for your host.
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     depends_on:
       - api
     ports:
