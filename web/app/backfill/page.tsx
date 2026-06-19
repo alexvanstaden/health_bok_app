@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BackfillCandidate,
   BackfillOrder,
+  approveBackfillCandidates,
   approveCandidate,
   fetchBackfillDetails,
   listBackfillCandidates,
@@ -72,6 +73,26 @@ export default function BackfillQueue() {
     }
   }
 
+  // Reject a single Candidate inline (issue #73), the per-video mirror of "Reject
+  // selected". One click, no confirmation — matching the one-click Approve; a
+  // rejected backfill Candidate leaves the queue and won't resurface on re-backfill.
+  async function reject(videoId: string) {
+    setBusy(true);
+    try {
+      await rejectBackfillCandidates([videoId]);
+      setSelected((prev) => {
+        const next = new Set(prev);
+        next.delete(videoId);
+        return next;
+      });
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Lazily fetch one Candidate's real description + accurate date (issue #31). The
   // returned, updated Candidate is patched into the list in place; the poll would
   // also pick it up since it is persisted, but the immediate swap is snappier.
@@ -107,6 +128,22 @@ export default function BackfillQueue() {
     }
   }
 
+  // Approve every checked Candidate in one gesture (issue #73), the bulk mirror of
+  // per-video Approve. Idempotent server-side — already in-flight ones are skipped.
+  async function approveSelected() {
+    if (selected.size === 0) return;
+    setBusy(true);
+    try {
+      await approveBackfillCandidates([...selected]);
+      setSelected(new Set());
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <h1>Backfill</h1>
@@ -115,6 +152,13 @@ export default function BackfillQueue() {
       </p>
 
       <div className="row">
+        <button
+          className="primary"
+          disabled={busy || selected.size === 0}
+          onClick={approveSelected}
+        >
+          Approve selected ({selected.size})
+        </button>
         <button
           className="danger"
           disabled={busy || selected.size === 0}
@@ -176,6 +220,13 @@ export default function BackfillQueue() {
                   onClick={() => approve(c.video_id)}
                 >
                   Approve
+                </button>
+                <button
+                  className="danger"
+                  disabled={busy || c.state !== "candidate"}
+                  onClick={() => reject(c.video_id)}
+                >
+                  Reject
                 </button>
                 <button
                   disabled={fetching.has(c.video_id)}

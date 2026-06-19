@@ -233,6 +233,12 @@ class BulkReject(BaseModel):
     video_ids: list[str]
 
 
+class BulkApprove(BaseModel):
+    """The backfill Candidate video_ids the owner is approving in one gesture."""
+
+    video_ids: list[str]
+
+
 @app.get("/api/creators")
 def list_creators() -> dict:
     """The watch list: each Creator with its resolved channel name (issue #15)."""
@@ -346,6 +352,18 @@ def reject_backfill(body: BulkReject) -> dict:
     with _repo() as repo:
         rejected = review.bulk_reject(body.video_ids, repo=repo)
     return {"rejected": rejected}
+
+
+@app.post("/api/backfill/approve")
+def approve_backfill(body: BulkApprove) -> dict:
+    """Bulk-approve the selected backfill Candidates (issue #73).
+
+    Approves every selected Candidate in one gesture and returns how many were
+    *newly* approved — already in-flight ones are skipped, so it is safe to re-send.
+    """
+    with _repo() as repo:
+        approved = review.bulk_approve(body.video_ids, repo=repo)
+    return {"approved": approved}
 
 
 def _snippet(body: str, *, limit: int = 280) -> str:

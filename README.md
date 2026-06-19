@@ -80,7 +80,8 @@ boundary. In it you:
   Ask stays the primary way to *explore* (ADR-0009/0011); this is the visual map.
 - **Manage Creators & backfill.** Add a Creator by @handle or channel URL (resolved once to
   a stable channel_id), see its resolved name, pull in its recent back-catalogue as
-  metadata-only Candidates, or remove it. Bulk-reject obvious noise; approving a backfill
+  metadata-only Candidates, or remove it. Approve or reject each Candidate inline, or check
+  several and **Approve selected** / **Reject selected** in one gesture; approving a backfill
   Candidate runs the *same* pipeline as a daily one (transcribing-if-needed first).
 - **Record the personal layer.** **Goals** (intentions or risks and the Concepts they
   concern — editable on the Goal's page after creation, by picking from the catalogue or
@@ -378,8 +379,10 @@ Adding a Creator also **backfills** its recent back-catalogue as metadata-only *
 every past upload published within `BACKFILL_CUTOFF_DAYS` (default ~2 years) is recorded by
 thumbnail, title, description, publish date, and URL — no Transcript fetched, Whisper never
 called. Re-adding a Creator, or hitting **Backfill** in the Web App, only tops up
-newly-published ones. These Candidates await approval in the Web App's *Backfill* tab; on
-approval the worker acquires a Transcript (free captions, else Whisper) before extraction.
+newly-published ones. These Candidates await approval in the Web App's *Backfill* tab, where
+each row can be approved or rejected on its own, or you can check several and **Approve
+selected** / **Reject selected** at once; on approval the worker acquires a Transcript (free
+captions, else Whisper) before extraction.
 
 The back-catalogue is listed in one cheap pass, which carries no per-video description and
 only a best-effort publish date. Each Candidate therefore has a **Fetch details** action: it

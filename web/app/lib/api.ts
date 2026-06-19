@@ -161,6 +161,17 @@ export function rejectBackfillCandidates(videoIds: string[]): Promise<{ rejected
   });
 }
 
+// Bulk-approve the selected backfill Candidates in one gesture (issue #73). Returns
+// how many were *newly* approved; already in-flight ones are skipped server-side, so
+// re-sending is safe. Each fresh approval runs the same pipeline as a daily Candidate.
+export function approveBackfillCandidates(videoIds: string[]): Promise<{ approved: number }> {
+  return json("/api/backfill/approve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ video_ids: videoIds }),
+  });
+}
+
 // -- The Body of Knowledge browser (issue #14) ------------------------------
 // The browsable, editable evidence layer (ADR-0009 "no visual graph"). List and
 // detail reads resolve connections server-side by traversing `edges`; the detail
