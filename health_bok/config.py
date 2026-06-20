@@ -163,6 +163,20 @@ def summary_model() -> str:
     return os.environ.get("SUMMARY_MODEL") or default_chat_model()
 
 
+def summary_max_chars() -> int:
+    """Transcript length (chars) at or under which summarization stays single-pass.
+
+    A longer Transcript is map-reduced (issue #6). Shared by the daily job and the
+    summarize-on-admission step (issue #80) so both size their summarizer identically.
+    """
+    return _positive_int("SUMMARY_MAX_CHARS", DEFAULT_SUMMARY_MAX_CHARS)
+
+
+def summary_chunk_chars() -> int:
+    """Section size (chars) a long Transcript is chunked into before map-reduce (#6)."""
+    return _positive_int("SUMMARY_CHUNK_CHARS", DEFAULT_SUMMARY_CHUNK_CHARS)
+
+
 def query_model() -> str:
     """The model used to synthesize grounded query answers (ADR-0011, ADR-0012).
 

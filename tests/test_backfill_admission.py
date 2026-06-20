@@ -32,8 +32,10 @@ from tests.fakes import (
     FakeContentSource,
     FakeEmbedder,
     FakeExtractor,
+    FakeSummarizer,
     FakeTranscriber,
 )
+from tests.seed import seed_processed_video
 
 HUBERMAN = CreatorIdentity(channel_id="UC2D2CMWXMOVWx7giW1n3LIg", name="Huberman Lab")
 ATTIA = CreatorIdentity(channel_id="UC8kGsMa0LygSlsDfASTbjBA", name="Peter Attia MD")
@@ -41,6 +43,8 @@ HANDLE = "@hubermanlab"
 EMBED_MODEL = "fake-embed"
 
 CLAIM_TEXT = "Morning sunlight advances circadian rhythm."
+SUMMARY_MODEL = "fake-summary-model"
+SUMMARY_TEXT = "A concise prose summary of the admitted video."
 
 
 def _now() -> datetime:
@@ -328,6 +332,95 @@ def test_failed_backfill_admission_keeps_transcript_so_retry_does_not_re_transcr
     assert repo.admission_state(video_id) == "admitted"
     assert [c.text for c in repo.admitted_claims(video_id)] == [CLAIM_TEXT]
     assert source.fetched_video_ids == [video_id]  # acquired exactly once, not on retry
+
+
+# == Summarize-on-admission (issue #80) =====================================
+
+
+def test_admitting_a_backfill_candidate_without_a_summary_summarizes_it(conn):
+    # A backfill Candidate goes candidate → approve → admission, skipping the daily
+    # summarize step, so it would land admitted with no Summary. The worker fills the
+    # gap on admission (issue #80) so it carries the same Summary a daily video gets.
+    video_id = "bf_summary"
+    _seed_backfill_candidate(conn, video_id)
+    repo = Repository(conn)
+    review.approve_candidate(video_id, repo=repo)
+
+    source = FakeContentSource(transcripts={video_id: _captions(video_id)})
+    summarizer = FakeSummarizer(SUMMARY_TEXT)
+    drain(
+        content_source=source,
+        transcriber=FakeTranscriber(),
+        extractor=FakeExtractor(_extraction()),
+        normalizer=_normalizer(repo),
+        repo=repo,
+        summarizer=summarizer,
+        model=SUMMARY_MODEL,
+    )
+
+    assert repo.admission_state(video_id) == "admitted"
+    # The admitted backfill video now has both Claims and a Summary — so it appears on
+    # the Logs page with its Summary (AC, issue #79's companion change).
+    assert [c.text for c in repo.admitted_claims(video_id)] == [CLAIM_TEXT]
+    summary = repo.get_summary(video_id)
+    assert summary is not None
+    assert summary.body == SUMMARY_TEXT
+    # The summarizer ran exactly once, over the now-archived Transcript.
+    assert len(summarizer.summarized) == 1
+
+
+def test_admitting_an_already_summarized_daily_candidate_does_not_re_summarize(conn):
+    # A daily Candidate was summarized before review, so it already has a Summary.
+    # Admission must not re-summarize it — that would re-pay the cost (issue #80).
+    video_id = "daily_vid"
+    repo = Repository(conn)
+    seed_processed_video(repo, video_id=video_id, summary="The original daily summary.")
+    review.approve_candidate(video_id, repo=repo)
+
+    summarizer = FakeSummarizer(SUMMARY_TEXT)
+    drain(
+        content_source=FakeContentSource(),
+        transcriber=FakeTranscriber(),
+        extractor=FakeExtractor(_extraction()),
+        normalizer=_normalizer(repo),
+        repo=repo,
+        summarizer=summarizer,
+        model=SUMMARY_MODEL,
+    )
+
+    assert repo.admission_state(video_id) == "admitted"
+    # The daily Summary is left untouched: the summarizer is never called.
+    assert summarizer.summarized == []
+    assert repo.get_summary(video_id).body == "The original daily summary."
+
+
+def test_a_summarize_failure_does_not_undo_an_otherwise_successful_admission(conn):
+    # Summarize-on-admission is failure-isolated (ADR-0005): a summarizer hiccup is
+    # logged and rolled back, never failing the durable admission (issue #80 AC).
+    video_id = "bf_sumfail"
+    _seed_backfill_candidate(conn, video_id)
+    repo = Repository(conn)
+    review.approve_candidate(video_id, repo=repo)
+
+    class _BoomSummarizer:
+        def summarize(self, transcript):
+            raise RuntimeError("summarizer unavailable")
+
+    source = FakeContentSource(transcripts={video_id: _captions(video_id)})
+    drain(
+        content_source=source,
+        transcriber=FakeTranscriber(),
+        extractor=FakeExtractor(_extraction()),
+        normalizer=_normalizer(repo),
+        repo=repo,
+        summarizer=_BoomSummarizer(),
+        model=SUMMARY_MODEL,
+    )
+
+    # The admission stands — Claims are durable — but no Summary was written.
+    assert repo.admission_state(video_id) == "admitted"
+    assert [c.text for c in repo.admitted_claims(video_id)] == [CLAIM_TEXT]
+    assert repo.get_summary(video_id) is None
 
 
 def _transcript_source(conn, video_id: str) -> str:

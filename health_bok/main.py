@@ -183,8 +183,9 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     """Drain the admission queue: extract → normalize → admit (ADR-0009, ADR-0010).
 
     Builds the real Extractor (on the configured LLM provider, ADR-0012) and
-    Embedder (OpenAI) behind their ports and runs the worker. Polls forever by
-    default — the docker `worker` service — or drains once with ``--once`` for an
+    Embedder (OpenAI) behind their ports, plus the map-reduce Summarizer the
+    summarize-on-admission step needs (issue #80), and runs the worker. Polls forever
+    by default — the docker `worker` service — or drains once with ``--once`` for an
     ops nudge. Needs the LLM and DB secrets but never the Digest ones.
     """
     conn = connect(config.database_url())
@@ -202,6 +203,17 @@ def _cmd_worker(args: argparse.Namespace) -> int:
         # against the owner's anchors (issue #18) — failure-isolated, so a judge
         # hiccup never undoes an admission.
         judge = ChatStanceJudge(llm.chat_model(config.stance_model()))
+        # A backfill Candidate is admitted without ever passing the daily summarize
+        # step, so the worker summarizes-if-missing on admission (issue #80), using the
+        # same map-reduce Summarizer the daily job does. A daily Candidate already has
+        # a Summary and is left untouched. Failure-isolated, so a summarize hiccup
+        # never undoes a durable admission.
+        summary_model = config.summary_model()
+        summarizer = MapReduceSummarizer(
+            ChatSummarizer(llm.chat_model(summary_model)),
+            max_chars=config.summary_max_chars(),
+            chunk_chars=config.summary_chunk_chars(),
+        )
         # A backfill Candidate has no archived Transcript, so the worker acquires
         # one transcribe-if-needed before extracting (issue #15): YouTube captions,
         # else Whisper (reusing the same OpenAI key the embedder needs).
@@ -216,6 +228,8 @@ def _cmd_worker(args: argparse.Namespace) -> int:
                 normalizer=normalizer,
                 repo=repo,
                 judge=judge,
+                summarizer=summarizer,
+                model=summary_model,
             )
             if handled:
                 logger.info("worker drained %d job(s)", handled)

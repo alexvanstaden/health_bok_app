@@ -26,7 +26,7 @@ from .acquire import acquire_transcript
 from .admit import admit_candidate
 from .concepts import ConceptNormalizer
 from .impacts import detect_for_admitted_video, detect_relationship_impacts_for_video
-from .ports import ContentSource, Extractor, StanceJudge, Transcriber
+from .ports import ContentSource, Extractor, StanceJudge, Summarizer, Transcriber
 from .repository import Repository
 
 logger = logging.getLogger("health_bok.worker")
@@ -44,6 +44,8 @@ def process_next_job(
     normalizer: ConceptNormalizer,
     repo: Repository,
     judge: StanceJudge | None = None,
+    summarizer: Summarizer | None = None,
+    model: str = "",
 ) -> bool:
     """Claim and run the next queued job. Returns ``False`` when none is queued.
 
@@ -56,11 +58,18 @@ def process_next_job(
     wrote is rolled back and the Candidate is driven to `failed` with the error
     recorded — never half-admitted, and the archived Transcript survives for retry.
 
-    Once admission has committed, the Impact engine runs the *forward* pass over the
-    just-admitted Claims/Protocols (issue #18) — but only if a `StanceJudge` is
-    wired, and failure-isolated in its own step, so a judge hiccup never undoes a
-    durable admission (ADR-0005). The daily-pipeline tests that don't exercise
-    change detection leave `judge` unset, and detection is simply skipped.
+    Once admission has committed, two post-admission steps run, each in its own
+    failure-isolated transaction so a hiccup never undoes the durable admission
+    (ADR-0005):
+
+      * **summarize-if-missing** (issue #80) — a backfill Candidate reaches admission
+        with Claims/Protocols but no Summary (it skipped the daily summarize step), so
+        the worker summarizes it now, writing the same Summary artifact a daily video
+        gets. A daily Candidate already has a Summary and is left untouched, never
+        re-paying the cost. Skipped entirely when no `Summarizer` is wired.
+      * the **Impact** forward pass over the just-admitted Claims/Protocols (issue
+        #18) — only if a `StanceJudge` is wired. The daily-pipeline tests that don't
+        exercise change detection leave `judge` unset, and detection is simply skipped.
     """
     job = repo.claim_next_job()
     if job is None:
@@ -89,8 +98,49 @@ def process_next_job(
         logger.warning("admission failed for %s: %s", job.video_id, exc)
         return True
 
+    _summarize_if_missing(
+        job.video_id, summarizer=summarizer, model=model, repo=repo
+    )
     _detect_impacts(job.video_id, judge=judge, repo=repo)
     return True
+
+
+def _summarize_if_missing(
+    video_id: str,
+    *,
+    summarizer: Summarizer | None,
+    model: str,
+    repo: Repository,
+) -> None:
+    """Summarize a just-admitted video if it has no Summary yet, failure-isolated (#80).
+
+    A daily Candidate was summarized before it was ever reviewed, so it already has a
+    Summary: this is a no-op for it, leaving the existing Summary untouched and never
+    re-paying the cost. A backfill Candidate went candidate → approve → admission,
+    skipping the daily summarize step, so it reaches admission with Claims/Protocols
+    but no Summary; this fills that gap, writing a `summaries` row and stamping
+    `summarized_at` exactly as the daily path does — so a backfill-admitted video
+    carries the same Summary artifact and shows on the Logs page with it (issue #79).
+
+    Runs *after* admission has committed, in its own transaction: a summarize hiccup is
+    logged and rolled back, never failing or undoing an otherwise-successful admission
+    (ADR-0005), consistent with the post-admission Impact passes. Skipped entirely when
+    no `Summarizer` is wired (the daily-pipeline tests that don't exercise it).
+    """
+    if summarizer is None:
+        return
+    try:
+        if repo.get_summary(video_id) is not None:
+            return  # already summarized (the daily path) — don't re-pay the cost
+        transcript = repo.load_fetched_transcript(video_id)
+        if transcript is None:
+            return
+        summary = summarizer.summarize(transcript)
+        repo.save_summary(video_id, summary, model=model, summarized_at=_utcnow())
+        repo.commit()
+    except Exception as exc:
+        repo.rollback()
+        logger.warning("summarize-on-admission failed for %s: %s", video_id, exc)
 
 
 def _detect_impacts(
@@ -156,6 +206,8 @@ def drain(
     normalizer: ConceptNormalizer,
     repo: Repository,
     judge: StanceJudge | None = None,
+    summarizer: Summarizer | None = None,
+    model: str = "",
 ) -> int:
     """Process every currently-queued job; return how many were handled."""
     handled = 0
@@ -166,6 +218,8 @@ def drain(
         normalizer=normalizer,
         repo=repo,
         judge=judge,
+        summarizer=summarizer,
+        model=model,
     ):
         handled += 1
     return handled
