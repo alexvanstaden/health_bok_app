@@ -177,7 +177,7 @@ health_bok/
 ├── personal.py      record Goals/Markers/Decisions & suggest-then-confirm linking
 ├── query.py         grounded NL query: retrieve → answer → ground (cite-or-abstain)
 ├── impacts.py       the Impact engine: forward/reverse/supersede + relationship (Tier-1/Tier-2) detection + inbox lifecycle
-├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle + forward Impact + relationship pass
+├── worker.py        drains the jobs queue (FOR UPDATE SKIP LOCKED); lifecycle + summarize-if-missing + forward Impact + relationship pass
 ├── api.py           FastAPI HTTP API the Web App calls: review · BoK · personal · query · Impacts
 ├── reprocess.py     one-off backfill: re-establish lateral Relationships across the existing library (#64)
 ├── main.py          CLI: `run` (daily job) · `worker` (drain queue) · `reprocess-relationships` · `hierarchy …` · `creators …`
