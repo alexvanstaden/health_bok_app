@@ -16,11 +16,19 @@ product surface — the Web App is the product, ADR-0009):
     re-extracts every already-admitted video from its archived Transcript through
     the supersede path so the pre-existing library gains lateral Relationships. No
     YouTube/Whisper; resumable and idempotent. Needs the LLM + DB secrets.
-  * ``health-bok hierarchy propose|export|apply`` is the no-UI curation round-trip
-    for the owner-curated `broader-of` taxonomy (issue #65): propose broader parents
-    across the existing catalogue, export them to a CSV the owner edits, and apply the
-    edited CSV (confirm/reject/repick). `propose` needs the LLM + DB secrets;
+  * ``health-bok hierarchy auto|propose|export|apply`` curates the owner-curated
+    `broader-of` taxonomy (issue #65, ADR-0014): `auto` proposes broader parents
+    across the catalogue and confirms the confident ones outright (leaving the rest
+    for review); `propose`/`export`/`apply` are the no-UI CSV round-trip — propose,
+    export to a CSV the owner edits, apply the edits (confirm/reject/repick).
+    `auto`/`propose` need the LLM + DB secrets;
     `export`/`apply` need only the DB.
+  * ``health-bok concepts dedup`` collapses near-duplicate Concepts across the
+    catalogue (ADR-0014). Idempotent; needs the LLM + DB secrets.
+  * ``health-bok goals backfill`` auto-attaches every Goal to the Concepts it
+    closely matches, catalogue-wide (ADR-0014) — the rerunnable counterpart to the
+    per-video goal-matching the worker runs. Idempotent; needs the embedding + DB
+    secrets.
 
 Creator management needs only ``DATABASE_URL`` plus the YouTube adapter, so it
 never requires the Digest or LLM secrets to be set.
@@ -33,7 +41,8 @@ import logging
 import sys
 import time
 
-from . import config, creators, hierarchy_backfill, llm
+from . import config, creators, curation, dedup, hierarchy_backfill, llm, personal
+from .adapters.adjudicator import ChatAdjudicator
 from .adapters.embedder import OpenAIEmbedder
 from .adapters.extractor import ChatExtractor
 from .adapters.hierarchy_proposer import ChatHierarchyProposer
@@ -102,6 +111,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     propose_p.set_defaults(handler=_cmd_hierarchy_propose)
 
+    auto_p = hsub.add_parser(
+        "auto",
+        help="Propose parents and auto-confirm the confident ones (two-tier, #ADR-0014).",
+    )
+    auto_p.set_defaults(handler=_cmd_hierarchy_auto)
+
     export_p = hsub.add_parser(
         "export", help="Export the current proposals to a CSV the owner edits."
     )
@@ -113,6 +128,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     apply_p.add_argument("path", help="The edited proposals CSV to apply.")
     apply_p.set_defaults(handler=_cmd_hierarchy_apply)
+
+    concepts_p = sub.add_parser("concepts", help="Maintain the Concept catalogue.")
+    concepts_p.set_defaults(handler=lambda a: concepts_p.error("a subcommand is required"))
+    ccsub = concepts_p.add_subparsers()
+
+    dedup_p = ccsub.add_parser(
+        "dedup", help="Merge near-duplicate Concepts across the catalogue (#ADR-0014)."
+    )
+    dedup_p.set_defaults(handler=_cmd_concepts_dedup)
+
+    goals_p = sub.add_parser("goals", help="Maintain the personal Goals layer.")
+    goals_p.set_defaults(handler=lambda a: goals_p.error("a subcommand is required"))
+    gsub = goals_p.add_subparsers()
+
+    goals_backfill_p = gsub.add_parser(
+        "backfill",
+        help="Auto-attach Goals to their matching Concepts, catalogue-wide (ADR-0014).",
+    )
+    goals_backfill_p.set_defaults(handler=_cmd_goals_backfill)
 
     creators_p = sub.add_parser("creators", help="Manage the watched Creators.")
     creators_p.set_defaults(handler=lambda a: creators_p.error("a subcommand is required"))
@@ -192,17 +226,29 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     try:
         init_schema(conn)
         repo = Repository(conn)
+        embedding_model = config.embedding_model()
+        embedder = OpenAIEmbedder(config.openai_api_key(), embedding_model)
+        # The LLM adjudicator decides the near-match band (0.15–0.30) the embedding is
+        # unsure about, so near-duplicate Concepts merge at admit time instead of
+        # minting a new hub (ADR-0014). Conservative — merges only clear synonyms.
         normalizer = ConceptNormalizer(
-            OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            embedder,
             repo,
-            model=config.embedding_model(),
+            model=embedding_model,
             merge_distance=config.concept_merge_distance(),
+            adjudicator=ChatAdjudicator(llm.chat_model(config.adjudication_model())),
         )
         extractor = ChatExtractor(llm.chat_model(config.extraction_model()))
         # After admission, the forward Impact pass judges the new Claims/Protocols
         # against the owner's anchors (issue #18) — failure-isolated, so a judge
         # hiccup never undoes an admission.
         judge = ChatStanceJudge(llm.chat_model(config.stance_model()))
+        # Also after admission, auto-organize the taxonomy: propose broader parents for
+        # the Concepts the video touched and confirm the confident ones (ADR-0014),
+        # reusing the HierarchyProposer the CLI backfill uses. Failure-isolated.
+        hierarchy_proposer = ChatHierarchyProposer(
+            llm.chat_model(config.hierarchy_proposal_model())
+        )
         # A backfill Candidate is admitted without ever passing the daily summarize
         # step, so the worker summarizes-if-missing on admission (issue #80), using the
         # same map-reduce Summarizer the daily job does. A daily Candidate already has
@@ -229,6 +275,9 @@ def _cmd_worker(args: argparse.Namespace) -> int:
                 repo=repo,
                 judge=judge,
                 summarizer=summarizer,
+                hierarchy_proposer=hierarchy_proposer,
+                embedder=embedder,
+                embedding_model=embedding_model,
                 model=summary_model,
             )
             if handled:
@@ -307,6 +356,39 @@ def _cmd_hierarchy_propose(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_hierarchy_auto(_args: argparse.Namespace) -> int:
+    """Auto-organize the taxonomy: propose parents, confirm the confident ones (ADR-0014).
+
+    The two-tier variant of `hierarchy propose`. Runs the same per-Concept suggester
+    over the whole catalogue, but confirms outright any proposal whose parent sits
+    within `curation.BROADER_AUTOCONFIRM_DISTANCE` (high-confidence tier → visible to
+    roll-up immediately) and leaves looser proposals unconfirmed for the review queue
+    (or the export/apply CSV). This is what retro-organizes the existing orphans in
+    one run. Idempotent — safe to re-run. Needs the LLM + DB secrets.
+    """
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        result = hierarchy_backfill.propose_all(
+            proposer=ChatHierarchyProposer(
+                llm.chat_model(config.hierarchy_proposal_model())
+            ),
+            embedder=OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            repo=repo,
+            model=config.embedding_model(),
+            auto_confirm_distance=curation.BROADER_AUTOCONFIRM_DISTANCE,
+        )
+    finally:
+        conn.close()
+    logger.info(
+        "hierarchy auto done: scanned=%d proposed=%d auto_confirmed=%d skipped_cycle=%d",
+        result.concepts_scanned, len(result.proposed),
+        len(result.auto_confirmed), len(result.skipped_cycle),
+    )
+    return 0
+
+
 def _cmd_hierarchy_export(args: argparse.Namespace) -> int:
     """Write the current proposals to a CSV the owner edits (issue #65). DB only."""
     conn = connect(config.database_url())
@@ -336,6 +418,61 @@ def _cmd_hierarchy_apply(args: argparse.Namespace) -> int:
         "skipped_cycle=%d skipped_missing=%d unchanged=%d",
         len(result.confirmed), len(result.rejected), len(result.repicked),
         len(result.skipped_cycle), len(result.skipped_missing), result.unchanged,
+    )
+    return 0
+
+
+def _cmd_concepts_dedup(_args: argparse.Namespace) -> int:
+    """Collapse near-duplicate Concepts across the catalogue (ADR-0014).
+
+    Builds the Embedder its pgvector retrieval needs and the LLM Adjudicator that
+    decides the near-match band, then merges confidently-duplicate hubs, keeping the
+    canonical one and re-pointing everything onto it. Idempotent and resumable — safe
+    to re-run. Needs the LLM + DB secrets.
+    """
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        result = dedup.dedup_catalogue(
+            embedder=OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            repo=repo,
+            model=config.embedding_model(),
+            adjudicator=ChatAdjudicator(llm.chat_model(config.adjudication_model())),
+        )
+    finally:
+        conn.close()
+    logger.info(
+        "concepts dedup done: scanned=%d merged=%d reviewed=%d skipped_cycle=%d",
+        result.concepts_scanned, len(result.merged),
+        len(result.reviewed_not_merged), len(result.skipped_cycle),
+    )
+    return 0
+
+
+def _cmd_goals_backfill(_args: argparse.Namespace) -> int:
+    """Auto-attach every Goal to the Concepts it closely matches, catalogue-wide (ADR-0014).
+
+    The rerunnable backfill counterpart to the per-video goal-matching the worker runs
+    after admission: matches each Goal's text against the whole Concept catalogue over
+    pgvector and attaches those within `personal.GOAL_AUTOATTACH_DISTANCE` not already
+    linked. Use it to bring existing Goals current after seeding the catalogue or after
+    raising the cutoff. Idempotent — safe to re-run. Needs the embedding + DB secrets.
+    """
+    conn = connect(config.database_url())
+    try:
+        init_schema(conn)
+        repo = Repository(conn)
+        result = personal.auto_attach_goal_concepts(
+            embedder=OpenAIEmbedder(config.openai_api_key(), config.embedding_model()),
+            repo=repo,
+            model=config.embedding_model(),
+        )
+    finally:
+        conn.close()
+    logger.info(
+        "goals backfill done: scanned=%d attached=%d",
+        result.goals_scanned, len(result.attached),
     )
     return 0
 

@@ -10,6 +10,8 @@ importing the package needs no `anthropic` install.
 
 from __future__ import annotations
 
+from ..ports import TruncatedCompletion
+
 
 class AnthropicChatModel:
     """A `ChatModel` backed by the Anthropic (Claude) Messages API."""
@@ -27,4 +29,10 @@ class AnthropicChatModel:
             system=system,
             messages=[{"role": "user", "content": user}],
         )
+        # A reply cut off at the budget would otherwise reach the caller's parser as
+        # half a string; fail honestly here instead (ADR-0012).
+        if message.stop_reason == "max_tokens":
+            raise TruncatedCompletion(
+                max_tokens=max_tokens, provider_reason="stop_reason=max_tokens"
+            )
         return "".join(b.text for b in message.content if b.type == "text").strip()

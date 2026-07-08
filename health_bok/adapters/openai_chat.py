@@ -11,6 +11,8 @@ Whisper already use — the point of the switch is one fewer external provider.
 
 from __future__ import annotations
 
+from ..ports import TruncatedCompletion
+
 
 class OpenAIChatModel:
     """A `ChatModel` backed by the OpenAI Chat Completions API."""
@@ -30,4 +32,11 @@ class OpenAIChatModel:
                 {"role": "user", "content": user},
             ],
         )
-        return (completion.choices[0].message.content or "").strip()
+        choice = completion.choices[0]
+        # A reply cut off at the budget would otherwise reach the caller's parser as
+        # half a string; fail honestly here instead (ADR-0012).
+        if choice.finish_reason == "length":
+            raise TruncatedCompletion(
+                max_tokens=max_tokens, provider_reason="finish_reason=length"
+            )
+        return (choice.message.content or "").strip()

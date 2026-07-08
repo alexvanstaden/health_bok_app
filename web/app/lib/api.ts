@@ -386,6 +386,38 @@ export function getConceptNeighbourhood(id: number): Promise<Neighbourhood> {
   return json(`/api/concepts/${id}/neighbourhood`);
 }
 
+// -- The broader-of review queue (ADR-0014) ---------------------------------
+// The two-tier auto path confirms confident parents outright and leaves looser
+// ones *proposed* — these are the ones awaiting a one-click confirm/reject, so a
+// wrong guess never silently organizes the taxonomy.
+
+export type BroaderOfProposal = {
+  narrower_id: number;
+  narrower_name: string;
+  broader_id: number;
+  broader_name: string;
+  // Cosine distance between the two Concepts' embeddings — the score the auto-confirm
+  // gate used. Lower is a closer, more confident match. `null` if either lacks an
+  // embedding.
+  distance: number | null;
+};
+
+export function getBroaderOfProposals(): Promise<{ proposals: BroaderOfProposal[] }> {
+  return json(`/api/broader-of/proposals`);
+}
+
+export function confirmBroaderOf(narrowerId: number, broaderId: number) {
+  return json(`/api/concepts/${narrowerId}/broader-of/${broaderId}/confirm`, {
+    method: "POST",
+  });
+}
+
+export function rejectBroaderOf(narrowerId: number, broaderId: number) {
+  return json(`/api/concepts/${narrowerId}/broader-of/${broaderId}`, {
+    method: "DELETE",
+  });
+}
+
 // -- The personal layer (issue #16) -----------------------------------------
 // The owner-specific layer (CONTEXT.md "Personal Layer"): Goals, Markers,
 // Decisions, recorded through guided forms and linked to the evidence layer by

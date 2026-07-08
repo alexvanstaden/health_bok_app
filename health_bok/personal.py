@@ -30,6 +30,7 @@ Embedder.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 
 from .concepts import ConceptNormalizer
@@ -243,6 +244,125 @@ def _goal_text(goal: Goal) -> str:
     if goal.detail:
         parts.append(goal.detail)
     return "\n".join(p.strip() for p in parts if p and p.strip())
+
+
+# The cutoff for *auto*-attaching a Goal↔Concept link (ADR-0014) — kept tighter than
+# the on-screen suggestion cutoff (`SUGGEST_MAX_DISTANCE = 0.6`): a Concept the Goal's
+# text matches closely is linked without the owner, while the 0.5–0.6 band still
+# surfaces as an owner-confirmed suggestion on the Goal page. Raised 0.4 → 0.5 on
+# 2026-07-08 alongside the hierarchy auto-confirm bump, so goal matching auto-attaches
+# more of what the owner was confirming by hand. A wrong auto-link is corrected in
+# place (ADR-0010), the safety net.
+GOAL_AUTOATTACH_DISTANCE = 0.5
+
+
+def auto_attach_goal_concepts_for_video(
+    video_id: str,
+    *,
+    embedder: Embedder,
+    repo: Repository,
+    model: str,
+    max_distance: float = GOAL_AUTOATTACH_DISTANCE,
+) -> list[tuple[int, int]]:
+    """Auto-link a just-admitted video's Concepts to the Goals they closely match (ADR-0014).
+
+    The high-confidence tier of goal-matching, run by the worker after admission: for
+    each Goal, embed its title + detail and match against the existing Concept
+    embeddings over pgvector (the *same* retrieval `suggest_goal_concepts` uses), then
+    attach — via the same `references` edge `attach_goal_concept` asserts — every
+    Concept that is (a) within the tight `max_distance`, (b) one this video actually
+    touched, and (c) not already linked. So a Goal stays current with the library
+    without the owner clicking, while looser matches remain owner-confirmed
+    suggestions on the Goal page. Idempotent (the edge unique constraint dedupes) and
+    commits only when it attached something. Returns the (goal_id, concept_id) links
+    made.
+    """
+    touched = set(repo.concept_ids_for_video(video_id))
+    if not touched:
+        return []
+    attached: list[tuple[int, int]] = []
+    for goal in repo.list_goals():
+        text = _goal_text(goal)
+        if not text:
+            continue
+        already = set(repo.concept_ids_for("goal", goal.id))
+        embedding = embedder.embed(text)
+        # The Goal's close Concept neighbourhood; intersected with this video's
+        # Concepts below. A generous scan limit so a touched match is never ranked
+        # out (within so tight a cutoff only a handful of Concepts ever qualify).
+        nearest = repo.nearest_concepts(
+            embedding, model=model, limit=200, max_distance=max_distance
+        )
+        for concept in nearest:
+            if concept.concept_id in touched and concept.concept_id not in already:
+                repo.add_edge(
+                    "goal", goal.id, "concept", concept.concept_id, "references"
+                )
+                attached.append((goal.id, concept.concept_id))
+    if attached:
+        repo.commit()
+        logger.info(
+            "auto-attached %d Goal-Concept link(s) for %s", len(attached), video_id
+        )
+    return attached
+
+
+@dataclass(frozen=True)
+class GoalBackfillResult:
+    """What a catalogue-wide goal auto-attach pass did (ADR-0014): how many Goals it
+    scanned and every (goal_id, concept_id) link it newly attached."""
+
+    goals_scanned: int
+    attached: list[tuple[int, int]]
+
+
+def auto_attach_goal_concepts(
+    *,
+    embedder: Embedder,
+    repo: Repository,
+    model: str,
+    max_distance: float = GOAL_AUTOATTACH_DISTANCE,
+) -> GoalBackfillResult:
+    """Back-fill goal-matching across the *whole* catalogue (ADR-0014).
+
+    The one-off / rerunnable companion to `auto_attach_goal_concepts_for_video`: where
+    that only considers the Concepts a single just-admitted video touched, this matches
+    every Goal against *every* existing Concept within the tight `max_distance` and
+    attaches the ones not already linked — the same `references` edge, the same pgvector
+    retrieval, the same cutoff. Use it to bring existing Goals current after seeding the
+    catalogue or after raising `GOAL_AUTOATTACH_DISTANCE`, since the per-video path only
+    ever sees new admissions.
+
+    Idempotent and resumable: already-linked Concepts are skipped and the edge unique
+    constraint dedupes, so re-running attaches only what is genuinely new. Commits once
+    at the end, and only if it attached something. Returns the pass's counts + links.
+    """
+    attached: list[tuple[int, int]] = []
+    goals = repo.list_goals()
+    for goal in goals:
+        text = _goal_text(goal)
+        if not text:
+            continue
+        already = set(repo.concept_ids_for("goal", goal.id))
+        embedding = embedder.embed(text)
+        # A generous scan limit so a close match is never ranked out; within so tight a
+        # cutoff only a handful of Concepts ever qualify per Goal anyway.
+        nearest = repo.nearest_concepts(
+            embedding, model=model, limit=200, max_distance=max_distance
+        )
+        for concept in nearest:
+            if concept.concept_id not in already:
+                repo.add_edge(
+                    "goal", goal.id, "concept", concept.concept_id, "references"
+                )
+                attached.append((goal.id, concept.concept_id))
+    if attached:
+        repo.commit()
+        logger.info(
+            "goal backfill: auto-attached %d Goal-Concept link(s) across %d Goal(s)",
+            len(attached), len(goals),
+        )
+    return GoalBackfillResult(goals_scanned=len(goals), attached=attached)
 
 
 # -- Markers ----------------------------------------------------------------

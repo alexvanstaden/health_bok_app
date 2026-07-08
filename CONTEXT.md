@@ -115,11 +115,13 @@ rule that `no_effect_on` contradicts any signed predicate on the same pair. **St
 _Avoid_: edge, association, link, correlation
 
 **broader-of**:
-The owner-curated *taxonomic* link that rolls narrower Concepts up under a broader one
+The *taxonomic* link that rolls narrower Concepts up under a broader one
 (Brain metabolism → Brain) — a DAG (multi-parent, acyclic), not claim-grounded, since no creator
-asserts it (ADR-0013). The system proposes parents (reusing the issue-#39 suggester); a proposal
-stays a suggestion, invisible to roll-up, until the owner confirms. Selecting a Concept shows its
-sub-Concepts *and* every Relationship in its whole subtree, attributed and ranked by Strength.
+asserts it (ADR-0013). The system proposes parents (reusing the issue-#39 suggester) and, under a
+**two-tier confidence gate** (ADR-0014), *confirms the confident ones outright* while a looser
+proposal stays a suggestion — invisible to roll-up — in the review queue until the owner confirms.
+Selecting a Concept shows its **family**: its parents, siblings, and everything under them, with
+every Relationship in that family attributed and ranked by Strength.
 _Avoid_: parent, category, tag, is-a
 
 **Trust-tier**:

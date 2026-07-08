@@ -24,6 +24,7 @@ export default function RootLayout({
           <a href="/claims">Claims</a>
           <a href="/protocols">Protocols</a>
           <a href="/concepts">Concepts</a>
+          <a href="/hierarchy">Hierarchy</a>
           <a href="/goals">Goals</a>
           <a href="/markers">Markers</a>
           <a href="/decisions">Decisions</a>

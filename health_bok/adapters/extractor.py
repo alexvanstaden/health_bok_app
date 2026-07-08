@@ -31,7 +31,13 @@ from ..models import (
 from ..ports import ChatModel
 from ..predicates import VOCABULARY, normalize_predicate
 
-_MAX_TOKENS = 4096
+# A long, dense transcript yields more Claims/Protocols than 4096 output tokens
+# could hold, so the JSON was being cut off mid-string and failing to parse. The
+# budget scales with content, not cost (providers bill actual output, not the cap),
+# and a genuine overflow now raises `TruncatedCompletion` rather than corrupting the
+# parse. 16384 clears every transcript seen so far; chunking is the durable fix for
+# anything longer still.
+_MAX_TOKENS = 16384
 
 _SYSTEM = (
     "You extract structured knowledge from health & longevity video transcripts "

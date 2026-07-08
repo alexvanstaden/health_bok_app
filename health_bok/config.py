@@ -239,6 +239,15 @@ def hierarchy_proposal_model() -> str:
     return os.environ.get("HIERARCHY_PROPOSAL_MODEL") or default_chat_model()
 
 
+def adjudication_model() -> str:
+    """The model the concept-merge Adjudicator uses in the near-match band (ADR-0014).
+
+    Defaults to the configured provider's default chat model; tunable via
+    ADJUDICATION_MODEL if deciding "same Concept?" warrants a different one.
+    """
+    return os.environ.get("ADJUDICATION_MODEL") or default_chat_model()
+
+
 def impact_candidate_limit() -> int:
     """Per-category cap on candidates one Impact detection pass judges (issue #18).
 

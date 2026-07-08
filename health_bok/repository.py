@@ -1585,6 +1585,127 @@ class Repository:
             )
             return cur.fetchone()[0]
 
+    def merge_concepts(self, keep_id: int, drop_id: int) -> bool:
+        """Merge the `drop` Concept into `keep`, repointing everything, then delete it.
+
+        The de-duplication write (ADR-0014): two hubs that turned out to be the same
+        thing (e.g. "Alzheimer's disease" and "Alzheimer's") collapse onto one, so
+        relatedness-by-shared-Concept stops fragmenting. Every reference to `drop` is
+        moved to `keep` in one transaction, skipping anything that would duplicate an
+        existing `keep` reference or self-loop, so no dangling ref and no constraint
+        violation survives:
+
+          * `markers` — plain FK repoint (a reading keeps its history under `keep`);
+          * `edges` — `references`/`broader-of`, repointed as src and as dst, with
+            self-loops and would-be duplicates dropped rather than repointed;
+          * `embeddings` — `drop`'s vector is discarded (`keep`'s canonical one wins);
+          * `concept_relations` (+ their Claim evidence) — each relation touching
+            `drop` is folded onto the equivalent `keep` relation, moving its evidence
+            and collapsing a self-loop; the removed relations' Impacts go with them;
+          * `impacts` anchored on / sourced from the merged-away Concept are removed.
+
+        Returns ``False`` if either Concept is missing or the two ids are equal. May
+        raise the `broader-of` cycle-guard if repointing a hierarchy edge would close
+        a loop — the caller rolls back and skips that pair. Does not commit.
+        """
+        if keep_id == drop_id:
+            return False
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM concepts WHERE id = ANY(%s)", ([keep_id, drop_id],)
+            )
+            if cur.fetchone()[0] != 2:
+                return False
+
+            # 1) Markers: a reading references its Concept by FK, no uniqueness to hit.
+            cur.execute(
+                "UPDATE markers SET concept_id = %s WHERE concept_id = %s",
+                (keep_id, drop_id),
+            )
+
+            # 2) Edges (polymorphic): repoint as src, then as dst, skipping any that
+            # would self-loop or duplicate an existing `keep` edge of the same kind;
+            # then delete the leftovers still hanging off `drop`.
+            for col, other_type, other_id in (
+                ("src_id", "dst_type", "dst_id"),
+                ("dst_id", "src_type", "src_id"),
+            ):
+                col_type = "src_type" if col == "src_id" else "dst_type"
+                cur.execute(
+                    f"UPDATE edges e SET {col} = %(keep)s "
+                    f"WHERE e.{col_type} = 'concept' AND e.{col} = %(drop)s "
+                    f"  AND NOT (e.{other_type} = 'concept' AND e.{other_id} = %(keep)s) "
+                    f"  AND NOT EXISTS (SELECT 1 FROM edges x WHERE x.kind = e.kind "
+                    f"    AND x.{col_type} = 'concept' AND x.{col} = %(keep)s "
+                    f"    AND x.{other_type} = e.{other_type} AND x.{other_id} = e.{other_id})",
+                    {"keep": keep_id, "drop": drop_id},
+                )
+            cur.execute(
+                "DELETE FROM edges WHERE (src_type = 'concept' AND src_id = %(drop)s) "
+                "OR (dst_type = 'concept' AND dst_id = %(drop)s)",
+                {"drop": drop_id},
+            )
+
+            # 3) Embeddings: keep the surviving Concept's vector; drop the other's.
+            cur.execute(
+                "DELETE FROM embeddings WHERE owner_type = 'concept' AND owner_id = %s",
+                (drop_id,),
+            )
+
+            # 4) Lateral relations: fold each relation touching `drop` onto the
+            # equivalent `keep` relation, moving evidence; collapse self-loops.
+            cur.execute(
+                "SELECT id, src_concept_id, predicate, dst_concept_id "
+                "FROM concept_relations "
+                "WHERE src_concept_id = %(d)s OR dst_concept_id = %(d)s",
+                {"d": drop_id},
+            )
+            removed_relations: list[int] = []
+            for rid, src, pred, dst in cur.fetchall():
+                new_src = keep_id if src == drop_id else src
+                new_dst = keep_id if dst == drop_id else dst
+                if new_src == new_dst:  # a relation to itself is meaningless now
+                    removed_relations.append(rid)
+                    continue
+                cur.execute(
+                    "INSERT INTO concept_relations "
+                    "  (src_concept_id, predicate, dst_concept_id) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (src_concept_id, predicate, dst_concept_id) "
+                    "  DO UPDATE SET src_concept_id = EXCLUDED.src_concept_id "
+                    "RETURNING id",
+                    (new_src, pred, new_dst),
+                )
+                target_id = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO concept_relation_evidence (relation_id, claim_id) "
+                    "SELECT %s, claim_id FROM concept_relation_evidence "
+                    "WHERE relation_id = %s ON CONFLICT DO NOTHING",
+                    (target_id, rid),
+                )
+                removed_relations.append(rid)
+            if removed_relations:
+                # Evidence rows cascade with the relation; their Impacts do not.
+                cur.execute(
+                    "DELETE FROM impacts WHERE source_type = 'relation' "
+                    "AND source_id = ANY(%s)",
+                    (removed_relations,),
+                )
+                cur.execute(
+                    "DELETE FROM concept_relations WHERE id = ANY(%s)",
+                    (removed_relations,),
+                )
+
+            # 5) Impacts anchored on / sourced from the merged-away Concept.
+            cur.execute(
+                "DELETE FROM impacts WHERE (source_type = 'concept' AND source_id = %(d)s) "
+                "OR (anchor_type = 'concept' AND anchor_id = %(d)s)",
+                {"d": drop_id},
+            )
+
+            # 6) The Concept itself — now unreferenced everywhere.
+            cur.execute("DELETE FROM concepts WHERE id = %s", (drop_id,))
+        return True
+
     def add_embedding(
         self, owner_type: str, owner_id: int, embedding: list[float], *, model: str
     ) -> None:
@@ -1870,6 +1991,27 @@ class Repository:
             )
             return [r[0] for r in cur.fetchall()]
 
+    def family_concept_ids(self, concept_id: int) -> list[int]:
+        """The Concept's parent-rooted *family*: siblings and their subtrees (ADR-0014).
+
+        Where `descendant_concept_ids` looks only *down* from a Concept, this roots
+        one level *up* first — at each confirmed `broader-of` parent — and returns
+        the union of those parents' subtrees, so any leaf surfaces its whole family
+        (its parents, its siblings, and everything under them), not just its own
+        descendants. A Concept with no confirmed parent (a taxonomy root, or an
+        as-yet-unorganized Concept) has no family to root at, so this degrades to
+        its own subtree — the pre-ADR-0014 behaviour, unchanged for roots. Bounded
+        to one level up by design, so it never balloons toward the whole tree.
+        """
+        parents = self.broader_parents(concept_id, confirmed_only=True)
+        if not parents:
+            return self.descendant_concept_ids(concept_id)
+        family: dict[int, None] = {}  # ordered set: union of the parents' subtrees
+        for parent in parents:
+            for cid in self.descendant_concept_ids(parent.id):
+                family.setdefault(cid, None)
+        return list(family)
+
     def concept_neighbourhood(
         self,
         concept_id: int,
@@ -1877,22 +2019,25 @@ class Repository:
         half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
         now: datetime | None = None,
     ) -> Neighbourhood | None:
-        """The roll-up neighbourhood of a Concept (ADR-0013): sub-Concepts + relationships.
+        """The roll-up neighbourhood of a Concept (ADR-0013/0014): family + relationships.
 
-        Returns the selected Concept's sub-Concepts and every lateral relationship
-        in its whole `broader-of` subtree — surfaced at the selected Concept,
-        attributed to the descendant it came from (`via_*`), deduped across DAG
-        diamonds, and ranked by evidence Strength (distinct creators × trust-tier ×
-        recency). A relationship is flagged `contested` when an opposite or
-        `no_effect_on` predicate also holds on the same ordered pair. ``None`` if
-        the Concept does not exist.
+        Returns the selected Concept's *family* — its parent-rooted subtree
+        (`family_concept_ids`): parents, siblings, and everything under them, so
+        clicking any Concept surfaces the whole cluster it belongs to, not merely its
+        own descendants. Every lateral relationship touching that family is surfaced
+        at the selected Concept, attributed to the family member it came from
+        (`via_*`), deduped across DAG diamonds, and ranked by evidence Strength
+        (distinct creators × trust-tier × recency). A relationship is flagged
+        `contested` when an opposite or `no_effect_on` predicate also holds on the
+        same ordered pair. A Concept with no confirmed parent falls back to its own
+        subtree (unchanged). ``None`` if the Concept does not exist.
         """
         now = now or datetime.now(timezone.utc)
         name = self._concept_name(concept_id)
         if name is None:
             return None
 
-        subtree = self.descendant_concept_ids(concept_id)
+        subtree = self.family_concept_ids(concept_id)
         relations = self._neighbour_relations(
             concept_id, subtree, half_life_days=half_life_days, now=now
         )
@@ -2096,6 +2241,48 @@ class Repository:
                 "ORDER BY src_id, dst_id",
             )
             return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+
+    def broader_of_proposals(self) -> list[dict]:
+        """Every *unconfirmed* `broader-of` proposal, with both Concepts' names and
+        the cosine distance that ranked it (ADR-0014).
+
+        The review-queue read: the two-tier auto path leaves a looser proposal
+        unconfirmed, so it lands here for one-click confirm/reject, each row carrying
+        the narrower and broader Concepts' ids + names plus the `distance` between
+        their embeddings — the same score the auto-confirm gate used, surfaced so the
+        owner can see how confident each pending link is. Ordered closest-first so the
+        most confident links sit at the top of the queue. `distance` is ``None`` when
+        either Concept has no embedding yet. Confirmed edges are excluded.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT e.dst_id, n.name, e.src_id, b.name, "
+                "       round(MIN(en.embedding <=> eb.embedding)::numeric, 3) "
+                "FROM edges e "
+                "JOIN concepts n ON n.id = e.dst_id "
+                "JOIN concepts b ON b.id = e.src_id "
+                "LEFT JOIN embeddings en "
+                "  ON en.owner_type = 'concept' AND en.owner_id = e.dst_id "
+                "LEFT JOIN embeddings eb "
+                "  ON eb.owner_type = 'concept' AND eb.owner_id = e.src_id "
+                "  AND eb.model = en.model "
+                "WHERE e.kind = 'broader-of' AND e.src_type = 'concept' "
+                "  AND e.dst_type = 'concept' "
+                "  AND COALESCE(e.props->>'confirmed', 'false') = 'false' "
+                "GROUP BY e.dst_id, n.name, e.src_id, b.name "
+                "ORDER BY round(MIN(en.embedding <=> eb.embedding)::numeric, 3) "
+                "         ASC NULLS LAST, n.name, b.name",
+            )
+            return [
+                {
+                    "narrower_id": r[0],
+                    "narrower_name": r[1],
+                    "broader_id": r[2],
+                    "broader_name": r[3],
+                    "distance": float(r[4]) if r[4] is not None else None,
+                }
+                for r in cur.fetchall()
+            ]
 
     def nearest_concept(
         self, embedding: list[float], *, model: str
@@ -2904,6 +3091,28 @@ class Repository:
                 "SELECT dst_id FROM edges WHERE src_type = %s AND src_id = %s "
                 "AND dst_type = 'concept' AND kind = 'references' ORDER BY dst_id",
                 (src_type, src_id),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def concept_ids_for_video(self, video_id: str) -> list[int]:
+        """The distinct Concept ids a video's admitted Claims/Protocols reference.
+
+        The set a freshly-admitted video *touched* — the input to the post-admission
+        auto-hierarchy and goal-matching steps (ADR-0014), which organize those
+        Concepts and match them to Goals. Follows the same `references` edges the
+        neighbourhood and Impact engine traverse (ADR-0008), so all three agree on
+        what a video is "about".
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT e.dst_id FROM edges e "
+                "WHERE e.kind = 'references' AND e.dst_type = 'concept' AND ("
+                "  (e.src_type = 'claim' AND e.src_id IN "
+                "     (SELECT id FROM claims WHERE video_id = %(v)s)) "
+                "  OR (e.src_type = 'protocol' AND e.src_id IN "
+                "     (SELECT id FROM protocols WHERE video_id = %(v)s))"
+                ") ORDER BY e.dst_id",
+                {"v": video_id},
             )
             return [r[0] for r in cur.fetchall()]
 

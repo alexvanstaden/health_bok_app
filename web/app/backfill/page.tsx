@@ -237,16 +237,19 @@ export default function BackfillQueue() {
                 <p className="summary muted">No description yet — fetch details to load it.</p>
               )}
               <div className="row">
+                {/* A fresh Candidate is approvable; a failed one is re-approvable
+                    so the owner can reprocess it (the worker re-runs the same
+                    pipeline). approved/processing/admitted are in-flight or done. */}
                 <button
                   className="primary"
-                  disabled={busy || c.state !== "candidate"}
+                  disabled={busy || (c.state !== "candidate" && c.state !== "failed")}
                   onClick={() => approve(c.video_id)}
                 >
-                  Approve
+                  {c.state === "failed" ? "Retry" : "Approve"}
                 </button>
                 <button
                   className="danger"
-                  disabled={busy || c.state !== "candidate"}
+                  disabled={busy || (c.state !== "candidate" && c.state !== "failed")}
                   onClick={() => reject(c.video_id)}
                 >
                   Reject

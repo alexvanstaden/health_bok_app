@@ -127,6 +127,54 @@ def test_propose_persists_unconfirmed_and_excludes_existing_parents(conn):
     assert repo.list_broader_of() == before
 
 
+def test_auto_confirms_close_parents_and_queues_far_ones(conn):
+    """ADR-0014 two-tier gate: `auto` confirms a close parent outright, queues a far one.
+
+    With `auto_confirm_distance` set, a proposal whose parent sits within the tight
+    band is confirmed (visible to roll-up immediately); a looser proposal is left
+    unconfirmed for the review queue. Uses an explicit test threshold (0.45) that the
+    two pairs straddle — this exercises the split mechanism independent of the
+    production `BROADER_AUTOCONFIRM_DISTANCE`: the APOE4→genetics pair is close (~0.29),
+    the cognition→brain pair is far (~0.59, inside the 0.6 suggestion band).
+    """
+    split_distance = 0.45
+    vectors = {
+        "brain": [1, 1, 1, 0],         # a broad parent, far from its leaf
+        "cognition": [1, 0, 0, 1],     # ~0.59 from brain -> queued, not auto-confirmed
+        "genetics": [0, 1, 1, 0],
+        "APOE4": [0, 0, 1, 0],         # ~0.29 from genetics -> auto-confirmed
+    }
+    embedder = FakeEmbedder(vectors)
+    repo = Repository(conn)
+    ids = {}
+    for name in vectors:
+        cid = repo.add_concept(name)
+        repo.add_embedding("concept", cid, embedder.embed(name), model=EMBED_MODEL)
+        ids[name] = cid
+    repo.commit()
+
+    proposer = _TaxonomyProposer({"cognition": ["brain"], "APOE4": ["genetics"]})
+    result = hierarchy_backfill.propose_all(
+        proposer=proposer, embedder=embedder, repo=repo, model=EMBED_MODEL,
+        auto_confirm_distance=split_distance,
+    )
+
+    # Both parents proposed; only the close one is confirmed by the two-tier gate.
+    assert set(result.proposed) == {
+        (ids["brain"], ids["cognition"]),
+        (ids["genetics"], ids["APOE4"]),
+    }
+    assert result.auto_confirmed == [(ids["genetics"], ids["APOE4"])]
+
+    # The confident edge rolls up immediately; the loose one waits, unconfirmed.
+    assert repo.list_broader_of(confirmed=True) == [
+        (ids["genetics"], ids["APOE4"], True)
+    ]
+    assert (ids["brain"], ids["cognition"], False) in repo.list_broader_of(
+        confirmed=False
+    )
+
+
 def test_propose_skips_a_cycle_closing_proposal(conn):
     """Two reciprocal proposals in one pass: the cycle-guard skips the loop, not crash."""
     repo = Repository(conn)

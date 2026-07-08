@@ -22,11 +22,22 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+import psycopg
+
+from . import curation, personal
 from .acquire import acquire_transcript
 from .admit import admit_candidate
 from .concepts import ConceptNormalizer
 from .impacts import detect_for_admitted_video, detect_relationship_impacts_for_video
-from .ports import ContentSource, Extractor, StanceJudge, Summarizer, Transcriber
+from .ports import (
+    ContentSource,
+    Embedder,
+    Extractor,
+    HierarchyProposer,
+    StanceJudge,
+    Summarizer,
+    Transcriber,
+)
 from .repository import Repository
 
 logger = logging.getLogger("health_bok.worker")
@@ -45,6 +56,9 @@ def process_next_job(
     repo: Repository,
     judge: StanceJudge | None = None,
     summarizer: Summarizer | None = None,
+    hierarchy_proposer: HierarchyProposer | None = None,
+    embedder: Embedder | None = None,
+    embedding_model: str = "",
     model: str = "",
 ) -> bool:
     """Claim and run the next queued job. Returns ``False`` when none is queued.
@@ -102,6 +116,16 @@ def process_next_job(
         job.video_id, summarizer=summarizer, model=model, repo=repo
     )
     _detect_impacts(job.video_id, judge=judge, repo=repo)
+    _link_hierarchy_for_video(
+        job.video_id,
+        proposer=hierarchy_proposer,
+        embedder=embedder,
+        model=embedding_model,
+        repo=repo,
+    )
+    _match_goals_for_video(
+        job.video_id, embedder=embedder, model=embedding_model, repo=repo
+    )
     return True
 
 
@@ -173,6 +197,86 @@ def _detect_impacts(
         logger.warning("impact detection failed for %s: %s", video_id, exc)
 
 
+def _link_hierarchy_for_video(
+    video_id: str,
+    *,
+    proposer: HierarchyProposer | None,
+    embedder: Embedder | None,
+    model: str,
+    repo: Repository,
+) -> None:
+    """Auto-organize the taxonomy for a just-admitted video's Concepts (ADR-0014).
+
+    The two-tier gate applied per-video, after admission has committed: for each
+    Concept the video touched, propose broader parents (the same embedding-cluster +
+    LLM suggester the CLI backfill uses) and, when a parent sits within
+    `curation.BROADER_AUTOCONFIRM_DISTANCE`, confirm it outright so roll-up organizes
+    without the owner; a looser proposal is left unconfirmed for the review queue. So
+    a newly-admitted Concept finds its place in the hierarchy automatically instead of
+    waiting to be curated by hand.
+
+    Runs *after* admission has committed, failure-isolated in its own transaction: a
+    proposer/embedder hiccup is logged and rolled back, never undoing the durable
+    admission (ADR-0005), consistent with the other post-admission steps. Skipped
+    entirely when no `HierarchyProposer`/`Embedder` is wired (the daily-pipeline tests
+    that don't exercise it).
+    """
+    if proposer is None or embedder is None:
+        return
+    try:
+        concept_ids = repo.concept_ids_for_video(video_id)
+    except Exception as exc:
+        repo.rollback()
+        logger.warning("auto-hierarchy failed for %s: %s", video_id, exc)
+        return
+    for concept_id in concept_ids:
+        try:
+            suggestions = curation.suggest_broader_of(
+                concept_id, proposer=proposer, embedder=embedder, repo=repo, model=model
+            )
+            for parent in suggestions:
+                try:
+                    proposed = curation.propose_broader_of(
+                        parent.id, concept_id, repo=repo
+                    )
+                except psycopg.errors.RaiseException:
+                    # The cycle-guard rejected an edge that would close a loop: roll
+                    # the failed proposal back and keep going (as the backfill does).
+                    repo.rollback()
+                    continue
+                if proposed and parent.distance <= curation.BROADER_AUTOCONFIRM_DISTANCE:
+                    curation.confirm_broader_of(parent.id, concept_id, repo=repo)
+        except Exception as exc:  # a proposer/embedder hiccup on one Concept
+            repo.rollback()
+            logger.warning(
+                "auto-hierarchy failed for %s concept %s: %s", video_id, concept_id, exc
+            )
+
+
+def _match_goals_for_video(
+    video_id: str, *, embedder: Embedder | None, model: str, repo: Repository
+) -> None:
+    """Auto-link a just-admitted video's Concepts to the Goals they match (ADR-0014).
+
+    The high-confidence tier of goal-matching, after admission has committed: a
+    Concept the video touched that closely matches a Goal's text is attached to it
+    automatically (`personal.auto_attach_goal_concepts_for_video`), so Goals stay
+    current without the owner curating; looser matches remain owner-confirmed
+    suggestions on the Goal page. Failure-isolated in its own transaction — a hiccup
+    is logged and rolled back, never undoing the durable admission (ADR-0005).
+    Skipped entirely when no `Embedder` is wired (the daily-pipeline tests).
+    """
+    if embedder is None:
+        return
+    try:
+        personal.auto_attach_goal_concepts_for_video(
+            video_id, embedder=embedder, repo=repo, model=model
+        )
+    except Exception as exc:
+        repo.rollback()
+        logger.warning("goal auto-match failed for %s: %s", video_id, exc)
+
+
 def _ensure_transcript_archived(
     video_id: str,
     *,
@@ -207,6 +311,9 @@ def drain(
     repo: Repository,
     judge: StanceJudge | None = None,
     summarizer: Summarizer | None = None,
+    hierarchy_proposer: HierarchyProposer | None = None,
+    embedder: Embedder | None = None,
+    embedding_model: str = "",
     model: str = "",
 ) -> int:
     """Process every currently-queued job; return how many were handled."""
@@ -219,6 +326,9 @@ def drain(
         repo=repo,
         judge=judge,
         summarizer=summarizer,
+        hierarchy_proposer=hierarchy_proposer,
+        embedder=embedder,
+        embedding_model=embedding_model,
         model=model,
     ):
         handled += 1
