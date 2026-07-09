@@ -353,9 +353,25 @@ CREATE INDEX IF NOT EXISTS markers_series ON markers (concept_id, measured_at);
 -- recorded it is never overwritten or removed, so the time-series stays a faithful
 -- audit of what was measured when. Enforced at the database with the same fail-loud
 -- pattern transcript immutability (ADR-0001) uses; a correction is a *new* reading.
+--
+-- The one permitted UPDATE is a pure *hub re-point*: a Concept merge (ADR-0014,
+-- issue #86) folds one hub onto another and a reading's `concept_id` must follow so
+-- nothing is lost. That leaves the measurement snapshot itself — value, unit,
+-- reference range, date — untouched, so it is a graph normalization, not a mutation
+-- of what was measured. Any UPDATE that also touches the snapshot is still blocked.
 CREATE OR REPLACE FUNCTION markers_immutable()
 RETURNS TRIGGER AS $$
 BEGIN
+    IF TG_OP = 'UPDATE'
+       AND NEW.id = OLD.id
+       AND NEW.concept_id IS DISTINCT FROM OLD.concept_id
+       AND NEW.value IS NOT DISTINCT FROM OLD.value
+       AND NEW.unit IS NOT DISTINCT FROM OLD.unit
+       AND NEW.reference_low IS NOT DISTINCT FROM OLD.reference_low
+       AND NEW.reference_high IS NOT DISTINCT FROM OLD.reference_high
+       AND NEW.measured_at IS NOT DISTINCT FROM OLD.measured_at THEN
+        RETURN NEW;  -- a Concept merge re-pointing the reading's hub
+    END IF;
     RAISE EXCEPTION 'markers are append-only dated snapshots (issue #16): % blocked', TG_OP;
 END;
 $$ LANGUAGE plpgsql;

@@ -1601,6 +1601,20 @@ class Repository:
             )
             return cur.fetchone()[0]
 
+    def rename_concept(self, concept_id: int, name: str) -> bool:
+        """Rename a Concept hub node. ``False`` if it's gone. Does not commit.
+
+        The owner-facing rename that rides along with a manual merge (issue #86):
+        after folding several hubs onto a survivor, the survivor may want a cleaner
+        canonical name than any of the originals. Concepts MAY be normalized by hand
+        — that is their purpose (CONTEXT.md "Concept") — so this is a plain UPDATE.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE concepts SET name = %s WHERE id = %s", (name, concept_id)
+            )
+            return cur.rowcount > 0
+
     def merge_concepts(self, keep_id: int, drop_id: int) -> bool:
         """Merge the `drop` Concept into `keep`, repointing everything, then delete it.
 
