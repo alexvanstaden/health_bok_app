@@ -55,9 +55,12 @@ boundary. In it you:
 - **Browse & edit** filterable lists of Claims, Protocols, and Concepts. Follow connections
   by navigation — a Claim's referenced Concepts and supported Protocols, a Protocol's
   justifying Claims, everything that references a Concept — each keeping its locator
-  deep-link back into the source. Every admitted Claim and Protocol can be edited or deleted
-  in place; an edit is marked a **protected version** so a later re-extraction won't clobber
-  your correction.
+  deep-link back into the source. Protocols also filter **by Concept** (those referencing
+  it) or **by Goal** (those whose Concepts overlap the Goal's — "what does the Body of
+  Knowledge recommend for this Goal?", adopted or not); the filter lives in the URL, so a
+  filtered view is shareable and survives reload. Every admitted Claim and Protocol can be
+  edited or deleted in place; an edit is marked a **protected version** so a later
+  re-extraction won't clobber your correction.
 - **See how Concepts connect.** Concepts link to *each other* two ways (ADR-0013). **Lateral
   relationships** are directed, typed, claim-grounded links ("APOE4 `risk_factor_for`
   Alzheimer's") — *derived automatically* from your Claims' predicate triples, with no edge to

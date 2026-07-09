@@ -14,11 +14,16 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-from health_bok import curation, review
+from health_bok import curation, personal, review
 from health_bok.repository import Repository
 from tests.fakes import FakeExtractor
 from tests.seed import seed_processed_video
-from tests.test_admission import RAPAMYCIN_CLAIM, drain_daily, make_extraction
+from tests.test_admission import (
+    RAPAMYCIN_CLAIM,
+    drain_daily,
+    make_extraction,
+    normalizer,
+)
 
 VIDEO_ID = "vid_bok"
 SOURCE_TITLE = "Zone 2 Cardio Explained"  # the seeded video's title
@@ -93,6 +98,55 @@ def test_browse_lists_admitted_entities_with_connections(conn):
     assert [c.text for c in only_rapamycin] == [RAPAMYCIN_CLAIM]
     creatine_concept = _concepts_by_name(repo)["creatine monohydrate"]
     assert [p.action for p in repo.list_protocols(concept_id=creatine_concept.id)] == [
+        "Take creatine monohydrate"
+    ]
+
+
+def test_protocols_filter_by_goal_via_concept_overlap(conn):
+    """Filtering Protocols by a Goal returns those whose Concepts overlap the Goal's
+    attached Concepts — discovery-oriented, not limited to adopted Protocols (#84).
+    """
+    repo = Repository(conn)
+    _admit(repo)
+    concepts = _concepts_by_name(repo)
+
+    # The seeded BoK has one Protocol — "Take creatine monohydrate" — referencing the
+    # Concept "creatine monohydrate". A Goal attached to that Concept overlaps it.
+    creatine_goal = personal.record_goal(
+        title="Build strength",
+        detail=None,
+        concepts=["creatine monohydrate"],
+        normalizer=normalizer(repo),
+        repo=repo,
+    )
+    assert [p.action for p in repo.list_protocols(goal_id=creatine_goal)] == [
+        "Take creatine monohydrate"
+    ]
+
+    # A Goal attached only to a Concept no Protocol references overlaps nothing.
+    rapamycin_goal = personal.record_goal(
+        title="Slow ageing",
+        detail=None,
+        concepts=["rapamycin"],
+        normalizer=normalizer(repo),
+        repo=repo,
+    )
+    assert repo.list_protocols(goal_id=rapamycin_goal) == []
+
+    # A Goal with no attached Concepts overlaps nothing: an empty list, by design —
+    # the Web App turns this into a "attach Concepts to this Goal" hint (#84).
+    bare_goal = personal.record_goal(
+        title="Feel better",
+        detail=None,
+        concepts=[],
+        normalizer=normalizer(repo),
+        repo=repo,
+    )
+    assert repo.get_goal(bare_goal).concepts == []
+    assert repo.list_protocols(goal_id=bare_goal) == []
+
+    # The Concept filter is unaffected and still narrows to the referencing Concept.
+    assert [p.action for p in repo.list_protocols(concept_id=concepts["creatine monohydrate"].id)] == [
         "Take creatine monohydrate"
     ]
 

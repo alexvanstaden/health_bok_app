@@ -321,8 +321,11 @@ export function deleteClaim(id: number) {
 
 export function listProtocols(filter: {
   conceptId?: number;
+  goalId?: number;
 }): Promise<{ protocols: BokProtocol[] }> {
-  return json(`/api/protocols${qs({ concept_id: filter.conceptId })}`);
+  return json(
+    `/api/protocols${qs({ concept_id: filter.conceptId, goal_id: filter.goalId })}`,
+  );
 }
 
 export function getProtocol(id: number): Promise<BokProtocol> {
