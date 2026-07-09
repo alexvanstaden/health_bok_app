@@ -260,11 +260,26 @@ class BokClaim:
 
 
 @dataclass(frozen=True)
+class ConceptWithClaims:
+    """A referenced Concept plus the admitted Claims that also reference it — the
+    per-Concept evidence grouping on a Protocol's detail (issue #85). Tells the
+    *why*: what the Protocol is for (the Concept) and what the owner's library
+    says about it (the Claims). Claims already shown as the Protocol's direct
+    justification are omitted so nothing reads as double-counted evidence.
+    """
+
+    id: int
+    name: str
+    claims: list[ClaimRef]
+
+
+@dataclass(frozen=True)
 class BokProtocol:
     """A Protocol in the BoK browser: its structured parameters, provenance +
     locator deep-link, the `protected` flag, and referenced Concepts. A *detail*
-    read fills `justified_by` — the Claims that support it; list reads leave it
-    empty.
+    read fills `justified_by` — the Claims that support it — and `concept_claims`
+    — per referenced Concept, the admitted Claims that also reference it (issue
+    #85); list reads leave both empty.
     """
 
     id: int
@@ -280,6 +295,7 @@ class BokProtocol:
     source_title: str
     concepts: list[ConceptRef]
     justified_by: list[ClaimRef] = field(default_factory=list)
+    concept_claims: list[ConceptWithClaims] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -2672,7 +2688,11 @@ class Repository:
 
         Fills `justified_by` — the Claims that support it — so the detail view can
         show and link to the evidence behind the recommendation (CONTEXT.md
-        "Protocol"; ADR-0008).
+        "Protocol"; ADR-0008). Also fills `concept_claims`: per referenced Concept,
+        the admitted Claims that reference that same Concept (issue #85), so the
+        owner reads the full story — Protocol → Concept → Claims — in one place.
+        Claims already in `justified_by` (direct evidence) are omitted from the
+        per-Concept groups so nothing reads as double-counted.
         """
         with self._conn.cursor() as cur:
             cur.execute(_PROTOCOL_SELECT + " WHERE p.id = %s", (protocol_id,))
@@ -2688,7 +2708,27 @@ class Repository:
                 (protocol_id,),
             )
             justified_by = [ClaimRef(id=r[0], text=r[1]) for r in cur.fetchall()]
-        return replace(protocol, justified_by=justified_by)
+            justified_ids = {c.id for c in justified_by}
+            concept_claims = []
+            for concept in protocol.concepts:
+                cur.execute(
+                    "SELECT cl.id, cl.text FROM edges e JOIN claims cl ON cl.id = e.src_id "
+                    "WHERE e.dst_type = 'concept' AND e.dst_id = %s "
+                    "AND e.src_type = 'claim' AND e.kind = 'references' "
+                    "ORDER BY cl.id",
+                    (concept.id,),
+                )
+                claims = [
+                    ClaimRef(id=r[0], text=r[1])
+                    for r in cur.fetchall()
+                    if r[0] not in justified_ids
+                ]
+                concept_claims.append(
+                    ConceptWithClaims(id=concept.id, name=concept.name, claims=claims)
+                )
+        return replace(
+            protocol, justified_by=justified_by, concept_claims=concept_claims
+        )
 
     def list_concepts(self, *, kind: str | None = None) -> list[BokConcept]:
         """Every Concept hub node, alphabetical; optionally filtered by kind.

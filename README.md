@@ -55,7 +55,10 @@ boundary. In it you:
 - **Browse & edit** filterable lists of Claims, Protocols, and Concepts. Follow connections
   by navigation — a Claim's referenced Concepts and supported Protocols, a Protocol's
   justifying Claims, everything that references a Concept — each keeping its locator
-  deep-link back into the source. Protocols also filter **by Concept** (those referencing
+  deep-link back into the source. A Protocol's detail also reads the full story in one
+  place — Protocol → Concept → Claims: under each referenced Concept it groups the Claims
+  about that Concept (the *why*), with the Protocol's direct justifying Claims deduped out
+  so nothing is double-counted. Protocols also filter **by Concept** (those referencing
   it) or **by Goal** (those whose Concepts overlap the Goal's — "what does the Body of
   Knowledge recommend for this Goal?", adopted or not); the filter lives in the URL, so a
   filtered view is shareable and survives reload. Every admitted Claim and Protocol can be

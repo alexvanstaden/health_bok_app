@@ -191,14 +191,30 @@ export default function ProtocolDetail({ params }: { params: { id: string } }) {
               ))
             )}
 
+            {/* References Concepts — each referenced Concept (what the Protocol
+                is *for*) grouped with the Claims about it (*why* follow it),
+                reading Protocol → Concept → Claims (issue #85). Claims already in
+                "Justified by Claims" above are omitted server-side so evidence
+                isn't double-counted. */}
             <h3>References Concepts</h3>
-            {protocol.concepts.length === 0 ? (
+            {protocol.concept_claims.length === 0 ? (
               <p className="muted">None.</p>
             ) : (
-              protocol.concepts.map((c) => (
-                <a key={c.id} href={`/concepts/${c.id}`} className="link-pill">
-                  {c.name}
-                </a>
+              protocol.concept_claims.map((g) => (
+                <div key={g.id} className="concept-group">
+                  <a href={`/concepts/${g.id}`} className="link-pill">
+                    {g.name}
+                  </a>
+                  {g.claims.length === 0 ? (
+                    <p className="muted">No other Claims about this Concept yet.</p>
+                  ) : (
+                    g.claims.map((c) => (
+                      <a key={c.id} href={`/claims/${c.id}`} className="link-pill claim">
+                        {c.text}
+                      </a>
+                    ))
+                  )}
+                </div>
               ))
             )}
           </div>

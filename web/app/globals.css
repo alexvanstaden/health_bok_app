@@ -224,6 +224,17 @@ input:focus, select:focus, textarea:focus {
 .link-pill:hover { border-color: var(--accent); }
 .crumb { color: var(--muted); }
 
+/* A referenced Concept and the Claims about it, grouped on a Protocol's detail
+   (issue #85): the Concept reads as the group header, its related Claims sit
+   indented beneath so the story reads Protocol → Concept → Claims. */
+.concept-group { margin: 0 0 0.8rem; }
+.concept-group .claim {
+  display: block;
+  margin-left: 1rem;
+  color: var(--muted);
+}
+.concept-group .muted { margin: 0.2rem 0 0 1rem; }
+
 /* A *new*-Concept suggestion (issue #39): confirming it mints a Concept, so it is
    set apart from an existing-Concept suggestion (a solid pill that only reuses) —
    a dashed, green-tinted pill says "this grows the vocabulary", not "reuse". */

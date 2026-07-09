@@ -562,6 +562,14 @@ def _protocol_dict(p: BokProtocol) -> dict:
         "source": {"video_id": p.source_video_id, "title": p.source_title},
         "concepts": [{"id": r.id, "name": r.name} for r in p.concepts],
         "justified_by": [{"id": r.id, "text": r.text} for r in p.justified_by],
+        "concept_claims": [
+            {
+                "id": g.id,
+                "name": g.name,
+                "claims": [{"id": r.id, "text": r.text} for r in g.claims],
+            }
+            for g in p.concept_claims
+        ],
     }
 
 

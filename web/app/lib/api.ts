@@ -252,6 +252,11 @@ export type BokClaim = {
   supports: ProtocolRef[]; // Protocols this Claim justifies (detail only)
 };
 
+// A referenced Concept grouped with the admitted Claims that also reference it —
+// the per-Concept evidence on a Protocol's detail (issue #85). Claims already in
+// `justified_by` are omitted so nothing reads as double-counted evidence.
+export type ConceptClaims = { id: number; name: string; claims: ClaimRef[] };
+
 export type BokProtocol = {
   id: number;
   action: string;
@@ -265,6 +270,7 @@ export type BokProtocol = {
   source: Source;
   concepts: ConceptRef[];
   justified_by: ClaimRef[]; // Claims that support it (detail only)
+  concept_claims: ConceptClaims[]; // per referenced Concept, its related Claims (detail only)
 };
 
 export type BokConcept = {
