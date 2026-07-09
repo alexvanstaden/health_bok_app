@@ -187,6 +187,41 @@ def test_detail_views_traverse_connections_both_ways(conn):
     assert repo.get_claim(999_999) is None  # a missing entity is a clean None
 
 
+def test_protocol_detail_groups_claims_per_referenced_concept(conn):
+    """A Protocol's detail carries, per referenced Concept, the admitted Claims that
+    also reference it (issue #85) — the *why* behind the recommendation — with the
+    Protocol's direct-justification Claims deduped out so evidence isn't double-counted.
+    """
+    repo = Repository(conn)
+    _admit(repo)
+
+    protocol = repo.list_protocols()[0]  # "Take creatine monohydrate" -> creatine
+    claims = _claims_by_text(repo)
+    zone2 = claims[ZONE2_CLAIM]
+    rapamycin = claims[RAPAMYCIN_CLAIM]
+    creatine = _concepts_by_name(repo)["creatine monohydrate"]
+
+    # No Claim references the creatine Concept yet, so the group still renders — it
+    # is just empty (the "Concept with no related Claims" state, issue #85).
+    [group] = repo.get_protocol(protocol.id).concept_claims
+    assert (group.id, group.name) == (creatine.id, "creatine monohydrate")
+    assert group.claims == []
+
+    # Two Claims now reference the creatine Concept; one of them (rapamycin) also
+    # directly justifies the Protocol, so it must be deduped out of the group.
+    repo.add_edge("claim", zone2.id, "concept", creatine.id, "references")
+    repo.add_edge("claim", rapamycin.id, "concept", creatine.id, "references")
+    repo.add_edge("claim", rapamycin.id, "protocol", protocol.id, "supports")
+    repo.commit()
+
+    pdetail = repo.get_protocol(protocol.id)
+    assert [c.text for c in pdetail.justified_by] == [RAPAMYCIN_CLAIM]  # direct evidence
+    [group] = pdetail.concept_claims
+    assert group.name == "creatine monohydrate"
+    # zone2 is grouped under the Concept; rapamycin is omitted (already direct evidence).
+    assert [c.text for c in group.claims] == [ZONE2_CLAIM]
+
+
 def test_edit_persists_and_marks_protected(conn):
     repo = Repository(conn)
     _admit(repo)
