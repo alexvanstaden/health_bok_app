@@ -212,10 +212,11 @@ export default function GoalDetail({ params }: { params: { id: string } }) {
                     key={s.concept_id}
                     className="link-pill"
                     disabled={busy}
-                    title={`distance ${s.distance.toFixed(3)}`}
+                    title={`cosine distance ${s.distance.toFixed(3)} — lower is a closer match`}
                     onClick={() => confirmSuggestion(s.name)}
                   >
-                    + {s.name}
+                    + {s.name}{" "}
+                    <span className="muted">{s.distance.toFixed(2)}</span>
                   </button>
                 ))}
               </div>

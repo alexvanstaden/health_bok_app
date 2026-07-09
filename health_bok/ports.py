@@ -113,6 +113,26 @@ class ContentSource(Protocol):
         ...
 
 
+class TruncatedCompletion(RuntimeError):
+    """A provider stopped because it hit `max_tokens`, so the reply is cut off.
+
+    Raised by the transport adapters when the model reports it ran out of output
+    budget mid-reply (OpenAI `finish_reason="length"`, Anthropic
+    `stop_reason="max_tokens"`). Without this, a truncated reply flows on to each
+    adapter's parser and surfaces as a misleading downstream error — e.g. the
+    Extractor's `json.loads` failing with "Unterminated string" — when the real
+    cause is simply that the response was too long for the budget. An honest,
+    named failure here is what reaches the worker's error log instead.
+    """
+
+    def __init__(self, *, max_tokens: int, provider_reason: str):
+        super().__init__(
+            f"model response truncated: hit the {max_tokens}-token output budget "
+            f"({provider_reason}), so the reply was cut off before it finished. "
+            f"Raise the budget or shorten the input."
+        )
+
+
 @runtime_checkable
 class ChatModel(Protocol):
     """One provider-neutral LLM turn: a system + user prompt in, text out (ADR-0012).
@@ -122,10 +142,16 @@ class ChatModel(Protocol):
     its prompts and its parsing; only this call differs between providers, so
     swapping OpenAI for Anthropic (or a fake in tests) is one factory away
     (`health_bok.llm`) and never touches the feature adapters.
+
+    A reply cut short by the output budget raises `TruncatedCompletion` rather than
+    returning a partial string, so no adapter's parser ever sees half a reply.
     """
 
     def complete(self, *, system: str, user: str, max_tokens: int) -> str:
-        """Return the model's text reply to `system` + `user`."""
+        """Return the model's text reply to `system` + `user`.
+
+        Raises `TruncatedCompletion` if the model hit `max_tokens` mid-reply.
+        """
         ...
 
 

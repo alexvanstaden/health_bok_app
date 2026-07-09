@@ -30,7 +30,12 @@ def test_openai_chat_sends_system_and_user_and_unwraps_content(monkeypatch):
             seen["max_tokens"] = max_tokens
             seen["messages"] = messages
             return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="  hi there  "))]
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="  hi there  "),
+                        finish_reason="stop",
+                    )
+                ]
             )
 
     monkeypatch.setattr("openai.OpenAI", _FakeOpenAI)
@@ -57,11 +62,12 @@ def test_anthropic_chat_passes_system_apart_and_joins_text_blocks(monkeypatch):
             seen["system"] = system
             seen["messages"] = messages
             return SimpleNamespace(
+                stop_reason="end_turn",
                 content=[
                     SimpleNamespace(type="text", text="part one "),
                     SimpleNamespace(type="thinking", text="ignored"),
                     SimpleNamespace(type="text", text="part two"),
-                ]
+                ],
             )
 
     monkeypatch.setattr("anthropic.Anthropic", _FakeAnthropic)
@@ -72,6 +78,52 @@ def test_anthropic_chat_passes_system_apart_and_joins_text_blocks(monkeypatch):
     assert out == "part one part two"  # only text blocks, joined and trimmed
     assert seen["system"] == "SYS"  # system is a top-level arg, not a message
     assert seen["messages"] == [{"role": "user", "content": "USR"}]
+
+
+def test_openai_chat_raises_on_truncation_instead_of_returning_half(monkeypatch):
+    # finish_reason="length" means the budget was hit mid-reply; the partial text
+    # must not flow on to a caller's parser as if it were complete (ADR-0012).
+    from health_bok.ports import TruncatedCompletion
+
+    class _FakeOpenAI:
+        def __init__(self, api_key):
+            self.chat = SimpleNamespace(completions=self)
+
+        def create(self, *, model, max_tokens, messages):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"claims": [{"text": "cut o'),
+                        finish_reason="length",
+                    )
+                ]
+            )
+
+    monkeypatch.setattr("openai.OpenAI", _FakeOpenAI)
+
+    model = OpenAIChatModel("sk-test", "gpt-4.1")
+    with pytest.raises(TruncatedCompletion, match="16384"):
+        model.complete(system="SYS", user="USR", max_tokens=16384)
+
+
+def test_anthropic_chat_raises_on_truncation_instead_of_returning_half(monkeypatch):
+    from health_bok.ports import TruncatedCompletion
+
+    class _FakeAnthropic:
+        def __init__(self, api_key):
+            self.messages = self
+
+        def create(self, *, model, max_tokens, system, messages):
+            return SimpleNamespace(
+                stop_reason="max_tokens",
+                content=[SimpleNamespace(type="text", text='{"claims": [{"text": "cut o')],
+            )
+
+    monkeypatch.setattr("anthropic.Anthropic", _FakeAnthropic)
+
+    model = AnthropicChatModel("sk-ant", "claude-sonnet-4-6")
+    with pytest.raises(TruncatedCompletion, match="16384"):
+        model.complete(system="SYS", user="USR", max_tokens=16384)
 
 
 def test_factory_defaults_to_openai(monkeypatch):

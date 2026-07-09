@@ -729,6 +729,19 @@ def concept_neighbourhood(concept_id: int) -> dict:
     return _neighbourhood_dict(hood)
 
 
+@app.get("/api/broader-of/proposals")
+def broader_of_proposals() -> dict:
+    """The review queue: every unconfirmed `broader-of` proposal (ADR-0014).
+
+    The two-tier auto path (`hierarchy auto` and the post-admission worker step)
+    confirms confident parents outright and leaves looser ones *proposed* — this is
+    where those land for one-click confirm/reject, each carrying the narrower and
+    broader Concepts' ids + names so the Web App renders and acts on them directly.
+    """
+    with _repo() as repo:
+        return {"proposals": repo.broader_of_proposals()}
+
+
 @app.get("/api/concepts/{concept_id}/broader-of/suggestions")
 def suggest_broader_of(concept_id: int) -> dict:
     """Broader Concepts this one could roll up under, for one-click confirm (ADR-0013)."""

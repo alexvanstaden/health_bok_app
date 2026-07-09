@@ -296,6 +296,50 @@ def test_subtree_rolls_up_with_attribution_dedup_and_strength_order(conn):
     assert by_src["Brain"].creator_count == 1
 
 
+def test_leaf_surfaces_its_whole_family_not_just_descendants(conn):
+    # ADR-0014: clicking any Concept shows its parent-rooted *family* — siblings and
+    # their subtrees — not merely its own descendants. Build the same diamond, then
+    # click a *child* (`Brain metabolism`): it must surface its sibling's subtree
+    # (`Neurochemistry`/`mitochondria`) and the relationship on the parent `Brain`,
+    # attributed to where each lives, exactly as clicking `Brain` itself does.
+    repo = Repository(conn)
+    for vid, chan in (("m1", "UC_a"), ("m2", "UC_b"), ("m3", "UC_c")):
+        _admit_relation(repo, video_id=vid, channel_id=chan, published=NOW,
+                        subject="mitochondria", predicate="associated_with", obj="ATP")
+    for vid, chan in (("k1", "UC_a"), ("k2", "UC_b")):
+        _admit_relation(repo, video_id=vid, channel_id=chan, published=NOW,
+                        subject="Brain metabolism", predicate="associated_with",
+                        obj="ketones")
+    _admit_relation(repo, video_id="s1", channel_id="UC_a", published=NOW,
+                    subject="Brain", predicate="associated_with", obj="sleep")
+    repo.add_concept("Neurochemistry")
+    repo.commit()
+
+    _broader_of(repo, "Brain", "Brain metabolism")
+    _broader_of(repo, "Brain", "Neurochemistry")
+    _broader_of(repo, "Brain metabolism", "mitochondria")
+    _broader_of(repo, "Neurochemistry", "mitochondria")
+
+    # Click the *child*, not the root.
+    hood = repo.concept_neighbourhood(_concept_id(repo, "Brain metabolism"),
+                                      now=NOW, half_life_days=365)
+    assert hood is not None
+
+    # The family, rooted at the parent `Brain`: the sibling and the diamond node show
+    # up even though they are not descendants of `Brain metabolism`.
+    assert {c.name for c in hood.sub_concepts} == {
+        "Brain", "Neurochemistry", "mitochondria",
+    }
+    # All three relationships surface — including the sibling's subtree and the
+    # parent's own relationship — deduped across the diamond.
+    by_src = {r.src_name: r for r in hood.relations}
+    assert set(by_src) == {"mitochondria", "Brain metabolism", "Brain"}
+    # The clicked Concept's own relationship is unattributed; the rest are tagged
+    # with the family member they live on.
+    assert by_src["Brain metabolism"].via_concept_id is None
+    assert by_src["Brain"].via_concept_name == "Brain"
+
+
 def test_unknown_concept_has_no_neighbourhood(conn):
     repo = Repository(conn)
     assert repo.concept_neighbourhood(999999, now=NOW) is None

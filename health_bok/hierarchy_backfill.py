@@ -60,6 +60,9 @@ class ProposeResult:
     """What a propose-all run did — for logging and test assertions."""
 
     proposed: list[tuple[int, int]] = field(default_factory=list)
+    # The subset of `proposed` a two-tier `auto` run confirmed outright because the
+    # parent was close enough (ADR-0014). Empty on a plain propose-only run.
+    auto_confirmed: list[tuple[int, int]] = field(default_factory=list)
     skipped_cycle: list[tuple[int, int]] = field(default_factory=list)
     concepts_scanned: int = 0
 
@@ -82,6 +85,7 @@ def propose_all(
     embedder: Embedder,
     repo: Repository,
     model: str,
+    auto_confirm_distance: float | None = None,
 ) -> ProposeResult:
     """Propose broader parents across every existing Concept, persisting them unconfirmed.
 
@@ -91,8 +95,17 @@ def propose_all(
     a loop within one run are caught by the DB cycle-guard, rolled back, and reported —
     never fatal. Idempotent: an already-proposed pair is not re-suggested (it is an
     existing parent) and re-asserting one leaves its confirmation state untouched.
+
+    With `auto_confirm_distance` set (the `hierarchy auto` path, ADR-0014), a proposal
+    whose parent sits within that cosine distance is *confirmed outright* — the
+    two-tier gate's high-confidence tier, so roll-up organizes automatically — while
+    a looser proposal is left unconfirmed for the review queue (or the export/apply
+    CSV). Confirming an already-acyclic proposal can never close a cycle (the guard
+    considers proposed edges too), so no extra guard is needed here. Left `None`
+    (the default), nothing is confirmed — the original propose-only behaviour.
     """
     proposed: list[tuple[int, int]] = []
+    auto_confirmed: list[tuple[int, int]] = []
     skipped_cycle: list[tuple[int, int]] = []
     concepts = repo.list_concepts()
 
@@ -112,15 +125,25 @@ def propose_all(
                     parent.id, concept.id,
                 )
                 skipped_cycle.append((parent.id, concept.id))
-            else:
-                proposed.append((parent.id, concept.id))
+                continue
+            proposed.append((parent.id, concept.id))
+            if (
+                auto_confirm_distance is not None
+                and parent.distance <= auto_confirm_distance
+            ):
+                curation.confirm_broader_of(parent.id, concept.id, repo=repo)
+                auto_confirmed.append((parent.id, concept.id))
 
     logger.info(
-        "hierarchy propose: %d concept(s) scanned, %d proposed, %d skipped (cycle)",
-        len(concepts), len(proposed), len(skipped_cycle),
+        "hierarchy propose: %d concept(s) scanned, %d proposed, %d auto-confirmed, "
+        "%d skipped (cycle)",
+        len(concepts), len(proposed), len(auto_confirmed), len(skipped_cycle),
     )
     return ProposeResult(
-        proposed=proposed, skipped_cycle=skipped_cycle, concepts_scanned=len(concepts)
+        proposed=proposed,
+        auto_confirmed=auto_confirmed,
+        skipped_cycle=skipped_cycle,
+        concepts_scanned=len(concepts),
     )
 
 

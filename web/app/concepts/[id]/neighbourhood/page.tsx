@@ -48,16 +48,17 @@ export default function ConceptNeighbourhood({ params }: { params: { id: string 
           <p className="subtitle">
             What this Concept connects to, ranked by evidence Strength and drawn from
             your own Claims. Each connection links through to the Claims behind it.
-            A high-level Concept rolls up its whole subtree: relationships living on a
-            narrower Concept appear here, tagged <em>via</em> where they live. To{" "}
+            This shows the whole <em>family</em>: {hood.concept.name}&rsquo;s parents,
+            its siblings, and everything under them — relationships living on a
+            related Concept appear here, tagged <em>via</em> where they live. To{" "}
             <em>explore</em> in prose, use <a href="/ask">Ask</a>.
           </p>
 
           {hood.sub_concepts.length > 0 && (
             <section className="card">
-              <h2>Sub-Concepts</h2>
+              <h2>Related Concepts</h2>
               <p className="muted">
-                Narrower Concepts that roll up under {hood.concept.name}. Their
+                Concepts in the same family as {hood.concept.name}. Their
                 relationships are included below.
               </p>
               <ul className="sub-concepts">

@@ -25,3 +25,6 @@ next-env.d.ts.bak
 
 # OS / editor
 .DS_Store
+
+# Generated hierarchy proposal exports (health-bok hierarchy export)
+proposals.csv

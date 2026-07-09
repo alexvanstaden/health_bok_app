@@ -260,6 +260,35 @@ def test_owner_can_reject_a_parent_and_pick_a_different_one(conn):
     assert [p.name for p in parents] == ["lipid metabolism"]
 
 
+def test_broader_of_proposals_lists_only_unconfirmed_with_names(conn):
+    # ADR-0014 review queue: the read backing the /hierarchy page returns every
+    # *unconfirmed* proposal with both Concepts' names, and drops confirmed ones.
+    repo = Repository(conn)
+    bmet = _mint(repo, "Brain metabolism")
+    brain = _mint(repo, "Brain")
+    lipids = _mint(repo, "lipid metabolism")
+    repo.commit()
+
+    # One confirmed edge (organized already) and one still-pending proposal.
+    curation.propose_broader_of(brain, bmet, repo=repo)
+    curation.confirm_broader_of(brain, bmet, repo=repo)
+    curation.propose_broader_of(lipids, bmet, repo=repo)
+
+    proposals = repo.broader_of_proposals()
+    # Only the unconfirmed one surfaces, carrying ids + names + the cosine distance
+    # between the two Concepts' embeddings for the Web App. "Brain metabolism"
+    # [1,0,0,0] and "lipid metabolism" [0,1,0,0] are orthogonal → distance 1.0.
+    assert proposals == [
+        {
+            "narrower_id": bmet,
+            "narrower_name": "Brain metabolism",
+            "broader_id": lipids,
+            "broader_name": "lipid metabolism",
+            "distance": 1.0,
+        }
+    ]
+
+
 def test_suggester_degrades_to_empty_on_llm_failure(conn):
     repo = Repository(conn)
     bmet = _mint(repo, "Brain metabolism")
