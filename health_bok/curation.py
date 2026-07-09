@@ -22,7 +22,10 @@ real Postgres.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+import psycopg
 
 from .ports import Embedder, HierarchyProposer
 from .repository import Repository
@@ -244,3 +247,70 @@ def reject_broader_of(broader_id: int, narrower_id: int, *, repo: Repository) ->
         return True
     repo.rollback()
     return False
+
+
+# -- Manual merge: the owner collapses several Concepts onto one (issue #86) ----
+#
+# De-duplication merges automatically (ADR-0014); this is the same write driven by
+# hand. Concepts are the one entity that MAY be merged/normalized (CONTEXT.md
+# "Concept"). The owner multi-selects hubs on /concepts, picks the survivor, and may
+# rename it in the same step. Every merged-away hub is folded onto the survivor and
+# deleted so *nothing is lost*: Claims, Protocols, Markers, Goal references,
+# `broader-of` edges, lateral Relationships (with evidence), and Impacts all re-point
+# to the survivor. The whole thing is one transaction — a merge that would close a
+# `broader-of` cycle fails whole, leaving no half-merged graph.
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    """What a manual merge did — the survivor, what folded onto it, and whether it
+    was renamed — for logging and test assertions."""
+
+    survivor_id: int
+    merged_away: list[int]
+    renamed: bool
+
+
+def merge_concepts(
+    survivor_id: int,
+    drop_ids: Sequence[int],
+    *,
+    new_name: str | None = None,
+    repo: Repository,
+) -> MergeResult | None:
+    """Fold every `drop` Concept onto `survivor`, optionally renaming it (issue #86).
+
+    Reuses `Repository.merge_concepts` — the de-dup write that already guarantees
+    nothing is lost — once per merged-away hub, then applies the optional rename, all
+    in *one* transaction so 3+ concepts collapse atomically. Returns ``None`` (a no-op
+    rollback) if the survivor or any drop is missing, or if no distinct drop is given.
+
+    A merge that would close a `broader-of` cycle raises `psycopg.errors.RaiseException`
+    from the DB cycle-guard; the whole transaction is rolled back first, so the caller
+    (the API endpoint, surfacing a 409) sees no partial state.
+    """
+    drops = [d for d in dict.fromkeys(drop_ids) if d != survivor_id]
+    if not drops:
+        repo.rollback()
+        return None
+    try:
+        for drop in drops:
+            if not repo.merge_concepts(survivor_id, drop):
+                repo.rollback()
+                return None
+        renamed = False
+        if new_name is not None:
+            if not repo.rename_concept(survivor_id, new_name):
+                repo.rollback()
+                return None
+            renamed = True
+    except psycopg.errors.RaiseException:
+        # Repointing a `broader-of` edge would close a loop — fail whole (issue #86).
+        repo.rollback()
+        raise
+    repo.commit()
+    logger.info(
+        "merged concept(s) %s into %s%s",
+        drops, survivor_id, " (renamed)" if renamed else "",
+    )
+    return MergeResult(survivor_id=survivor_id, merged_away=drops, renamed=renamed)

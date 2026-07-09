@@ -264,6 +264,73 @@ button.link-pill.new-concept:hover { filter: brightness(1.15); }
 }
 .adopt:hover { filter: brightness(1.05); }
 
+/* -- Manual Concept merge (issue #86) ------------------------------------- */
+
+/* A selectable Concept row: a checkbox to fold it into a merge, with the row's
+   name/badge/count laid out like the plain list-item link it replaces. */
+.select-row {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 0.5rem 0;
+}
+.select-row.selected { border-color: var(--accent); }
+.select-row input[type="checkbox"] { flex: none; width: 1rem; height: 1rem; }
+.select-row .grow { flex: 1; min-width: 0; }
+.select-row a { text-decoration: none; color: var(--text); }
+.select-row a:hover { color: var(--accent); }
+
+/* The merge action bar, pinned above the list once 2+ Concepts are selected. */
+.merge-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.7rem 0;
+  background: var(--bg);
+}
+
+/* The merge dialog: a centred panel over a dimming overlay (no modal lib). */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 20;
+}
+.dialog {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem 1.4rem;
+  max-width: 30rem;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.dialog h2 { margin: 0 0 0.5rem; font-size: 1.15rem; }
+.dialog .survivor-pick { display: grid; gap: 0.4rem; margin: 0.8rem 0; }
+.dialog .survivor-pick label {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.95rem;
+}
+.dialog .dialog-actions {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
 /* A suggest-then-confirm candidate row: label + why on the left, actions right. */
 .suggestion {
   display: flex;

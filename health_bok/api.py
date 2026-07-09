@@ -701,6 +701,54 @@ def concept_detail(concept_id: int) -> dict:
     return _concept_dict(concept)
 
 
+class MergeConcepts(BaseModel):
+    """A manual Concept merge (issue #86): the selected hubs, which one survives,
+    and an optional new name for the survivor — all confirmed in one step.
+
+    `concept_ids` is the full multi-selection from /concepts (2+ distinct hubs) and
+    must include `survivor_id`; every other selected Concept folds onto the survivor
+    and is deleted. A blank `new_name` leaves the survivor's name unchanged.
+    """
+
+    survivor_id: int
+    concept_ids: list[int]
+    new_name: str | None = None
+
+
+@app.post("/api/concepts/merge")
+def merge_concepts(body: MergeConcepts) -> dict:
+    """Fold the merged-away Concepts onto the survivor, optionally renaming it (issue #86).
+
+    Concepts are the one entity that MAY be merged/normalized (CONTEXT.md); this is
+    the owner-driven twin of ADR-0014 de-duplication. Everything referencing a
+    merged-away hub re-points to the survivor and the hub is deleted, atomically, so
+    nothing is lost. A merge that would close a `broader-of` cycle fails whole (409),
+    leaving no partial state.
+    """
+    distinct = set(body.concept_ids)
+    if body.survivor_id not in distinct or len(distinct) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="select 2+ Concepts and a survivor among them",
+        )
+    new_name = (body.new_name or "").strip() or None
+    drops = [c for c in body.concept_ids if c != body.survivor_id]
+    with _repo() as repo:
+        try:
+            result = curation.merge_concepts(
+                body.survivor_id, drops, new_name=new_name, repo=repo
+            )
+        except psycopg.errors.RaiseException as exc:  # broader-of cycle guard
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+    if result is None:
+        raise HTTPException(status_code=404, detail="concept not found")
+    return {
+        "survivor_id": result.survivor_id,
+        "merged_away": result.merged_away,
+        "renamed": result.renamed,
+    }
+
+
 # == Concept↔Concept relationships & the broader-of taxonomy (ADR-0013) ======
 #
 # Lateral relationships are a materialized projection of Claims (derived at admit

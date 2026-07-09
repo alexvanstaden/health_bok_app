@@ -84,6 +84,14 @@ boundary. In it you:
   Claims that evidence it** — each carrying its Source and locator deep-link, the same
   Citations the Ask view shows, so the map and your prose answers tell one consistent story.
   Ask stays the primary way to *explore* (ADR-0009/0011); this is the visual map.
+- **Merge Concepts by hand.** Concepts are the one entity that MAY be normalized (that is
+  their purpose) — beyond the automatic de-duplication (ADR-0014), select 2+ Concepts on
+  `/concepts`, pick which one **survives**, optionally **rename** it, and confirm. Everything
+  referencing the merged-away hubs — Claims, Protocols, Markers, Goal references, `broader-of`
+  hierarchy, lateral relationships (with their evidence), and Impacts — re-points to the
+  survivor and the merged-away hubs are deleted, atomically, so nothing is lost. Merging 3+ at
+  once folds each onto the survivor; a merge that would close a `broader-of` cycle fails whole
+  with a visible error and no partial state.
 - **Manage Creators & backfill.** Add a Creator by @handle or channel URL (resolved once to
   a stable channel_id), see its resolved name, pull in its recent back-catalogue as
   metadata-only Candidates, or remove it. Approve or reject each Candidate inline, or check

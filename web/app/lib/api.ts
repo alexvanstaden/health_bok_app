@@ -356,6 +356,24 @@ export function getConcept(id: number): Promise<BokConcept> {
   return json(`/api/concepts/${id}`);
 }
 
+// Manually merge 2+ Concepts onto one survivor, optionally renaming it (issue #86).
+// The owner-driven twin of ADR-0014 de-dup: everything referencing a merged-away hub
+// re-points to the survivor and the hub is deleted, atomically. A merge that would
+// close a broader-of cycle fails whole (the API returns 409, surfaced as an error).
+export type MergeConceptsResult = {
+  survivor_id: number;
+  merged_away: number[];
+  renamed: boolean;
+};
+
+export function mergeConcepts(body: {
+  survivor_id: number;
+  concept_ids: number[];
+  new_name?: string;
+}): Promise<MergeConceptsResult> {
+  return post("/api/concepts/merge", body);
+}
+
 // -- The Concept neighbourhood view (issue #51, ADR-0013) -------------------
 // The lateral, Strength-ranked map of what a Concept connects to. Each relation
 // is a directed, signed-predicate link (src → predicate → dst), ranked by
