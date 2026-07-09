@@ -626,10 +626,13 @@ def delete_claim(claim_id: int) -> dict:
 
 
 @app.get("/api/protocols")
-def browse_protocols(concept_id: int | None = None) -> dict:
-    """Filterable list of admitted Protocols (by referenced Concept)."""
+def browse_protocols(
+    concept_id: int | None = None, goal_id: int | None = None
+) -> dict:
+    """Filterable list of admitted Protocols — by referenced Concept, or by Goal
+    (Protocols whose Concepts overlap the Goal's attached Concepts; issue #84)."""
     with _repo() as repo:
-        protocols = repo.list_protocols(concept_id=concept_id)
+        protocols = repo.list_protocols(concept_id=concept_id, goal_id=goal_id)
     return {"protocols": [_protocol_dict(p) for p in protocols]}
 
 

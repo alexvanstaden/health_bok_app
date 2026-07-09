@@ -2625,20 +2625,41 @@ class Repository:
             supports = [ProtocolRef(id=r[0], action=r[1]) for r in cur.fetchall()]
         return replace(claim, supports=supports)
 
-    def list_protocols(self, *, concept_id: int | None = None) -> list[BokProtocol]:
+    def list_protocols(
+        self, *, concept_id: int | None = None, goal_id: int | None = None
+    ) -> list[BokProtocol]:
         """Every admitted Protocol for the BoK browser, newest first; filterable
-        by referenced Concept. Each carries its structured parameters, provenance,
-        locator deep-link, and Concepts; `justified_by` is left for the detail read.
+        by referenced Concept or by Goal. Each carries its structured parameters,
+        provenance, locator deep-link, and Concepts; `justified_by` is left for the
+        detail read.
+
+        The `goal_id` filter is discovery-oriented (issue #84): it returns Protocols
+        whose referenced Concepts overlap the Goal's attached Concepts — what the
+        Body of Knowledge recommends for a Goal, whether or not it's been adopted via
+        a Decision. A Goal with no attached Concepts overlaps nothing, so the result
+        is naturally empty. Concept and Goal filters aren't meant to compose; the Web
+        App sends at most one.
         """
-        where = ""
+        conditions: list[str] = []
         params: dict = {}
         if concept_id is not None:
-            where = (
-                " WHERE EXISTS (SELECT 1 FROM edges e2 WHERE e2.src_type = 'protocol' "
+            conditions.append(
+                "EXISTS (SELECT 1 FROM edges e2 WHERE e2.src_type = 'protocol' "
                 "AND e2.src_id = p.id AND e2.dst_type = 'concept' "
                 "AND e2.dst_id = %(concept_id)s AND e2.kind = 'references')"
             )
             params["concept_id"] = concept_id
+        if goal_id is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM edges pe "
+                "JOIN edges ge ON ge.src_type = 'goal' AND ge.src_id = %(goal_id)s "
+                "  AND ge.dst_type = 'concept' AND ge.kind = 'references' "
+                "  AND ge.dst_id = pe.dst_id "
+                "WHERE pe.src_type = 'protocol' AND pe.src_id = p.id "
+                "AND pe.dst_type = 'concept' AND pe.kind = 'references')"
+            )
+            params["goal_id"] = goal_id
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         with self._conn.cursor() as cur:
             cur.execute(
                 _PROTOCOL_SELECT + where + " ORDER BY p.created_at DESC, p.id DESC",
