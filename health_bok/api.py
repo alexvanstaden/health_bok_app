@@ -581,6 +581,8 @@ def _concept_dict(c: BokConcept) -> dict:
         "reference_count": c.reference_count,
         "claims": [{"id": r.id, "text": r.text} for r in c.claims],
         "protocols": [{"id": r.id, "action": r.action} for r in c.protocols],
+        "broader_parents": [{"id": r.id, "name": r.name} for r in c.broader_parents],
+        "proposed_parents": [{"id": r.id, "name": r.name} for r in c.proposed_parents],
     }
 
 
@@ -819,16 +821,25 @@ def suggest_broader_of(concept_id: int) -> dict:
 
 
 @app.post("/api/concepts/{narrower_id}/broader-of")
-def propose_broader_of(narrower_id: int, body: NewBroaderOf) -> dict:
-    """Propose a `broader-of` edge — a suggestion, invisible to roll-up until confirmed."""
+def attach_broader_of(narrower_id: int, body: NewBroaderOf) -> dict:
+    """Manually attach a broader parent — lands CONFIRMED immediately (issue #87).
+
+    Hierarchy is the one link the owner curates (ADR-0013), so a hand attach skips the
+    /hierarchy review queue (the two-tier gate vets the system's guesses, not the
+    owner's) and is visible to roll-up at once — like confirming a proposal, it fires
+    the scope-widening summary the newly-visible subtree owes. A cycle-closing attach
+    is rejected with a 409.
+    """
     with _repo() as repo:
         try:
-            ok = curation.propose_broader_of(body.broader_id, narrower_id, repo=repo)
+            ok = curation.attach_broader_of(body.broader_id, narrower_id, repo=repo)
         except psycopg.errors.RaiseException as exc:  # cycle guard
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        if ok:
+            _detect_broader_of_scope_widening(repo, body.broader_id, narrower_id)
     if not ok:
         raise HTTPException(status_code=404, detail="concept not found")
-    return {"broader_id": body.broader_id, "narrower_id": narrower_id, "confirmed": False}
+    return {"broader_id": body.broader_id, "narrower_id": narrower_id, "confirmed": True}
 
 
 @app.post("/api/concepts/{narrower_id}/broader-of/{broader_id}/confirm")

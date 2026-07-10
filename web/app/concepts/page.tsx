@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BokConcept, listConcepts, mergeConcepts } from "../lib/api";
+import AttachParent from "./AttachParent";
 
 export default function ConceptsList() {
   const [concepts, setConcepts] = useState<BokConcept[]>([]);
@@ -21,6 +22,7 @@ export default function ConceptsList() {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [merging, setMerging] = useState(false);
+  const [attachingId, setAttachingId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -122,6 +124,43 @@ export default function ConceptsList() {
                 </span>
               </div>
             </a>
+
+            {/* Hierarchy column: the Concept's confirmed broader-of parents, each a
+                link through to that parent, plus a quick inline attach (issue #87).
+                Proposals are omitted here — they stay invisible to roll-up. */}
+            <div className="parents">
+              <span className="muted">under</span>
+              {c.broader_parents.length === 0 ? (
+                <span className="muted">—</span>
+              ) : (
+                c.broader_parents.map((p) => (
+                  <a key={p.id} href={`/concepts/${p.id}`} className="parent-chip">
+                    {p.name}
+                  </a>
+                ))
+              )}
+              <button
+                className="link"
+                onClick={() =>
+                  setAttachingId((cur) => (cur === c.id ? null : c.id))
+                }
+              >
+                {attachingId === c.id ? "Cancel" : "+ parent"}
+              </button>
+            </div>
+
+            {attachingId === c.id && (
+              <AttachParent
+                narrowerId={c.id}
+                catalogue={concepts}
+                excludeIds={new Set(c.broader_parents.map((p) => p.id))}
+                autoFocus
+                onAttached={async () => {
+                  setAttachingId(null);
+                  await refresh();
+                }}
+              />
+            )}
           </div>
         </div>
       ))}

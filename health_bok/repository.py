@@ -300,9 +300,11 @@ class BokProtocol:
 
 @dataclass(frozen=True)
 class BokConcept:
-    """A Concept hub node in the BoK browser. List reads carry only
-    `reference_count` (how many Claims + Protocols point at it); a *detail* read
-    fills `claims` and `protocols` — everything that references it (ADR-0008).
+    """A Concept hub node in the BoK browser. List reads carry `reference_count`
+    (how many Claims + Protocols point at it) and `broader_parents` — its confirmed
+    `broader-of` parents (issue #87); a *detail* read additionally fills `claims` and
+    `protocols` — everything that references it (ADR-0008) — and `proposed_parents`,
+    the still-pending hierarchy proposals (invisible to roll-up until confirmed).
     """
 
     id: int
@@ -311,6 +313,8 @@ class BokConcept:
     reference_count: int
     claims: list[ClaimRef] = field(default_factory=list)
     protocols: list[ProtocolRef] = field(default_factory=list)
+    broader_parents: list[ConceptRef] = field(default_factory=list)
+    proposed_parents: list[ConceptRef] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -2256,6 +2260,62 @@ class Repository:
             )
             return [ConceptRef(id=r[0], name=r[1]) for r in cur.fetchall()]
 
+    def proposed_broader_parents(self, concept_id: int) -> list[ConceptRef]:
+        """The Concept's *unconfirmed* `broader-of` parents — the pending proposals
+        shown on the detail page (issue #87), invisible to roll-up until confirmed
+        (ADR-0013). The mirror of `broader_parents(confirmed_only=True)`."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.id, c.name FROM edges e JOIN concepts c ON c.id = e.src_id "
+                "WHERE e.kind = 'broader-of' AND e.dst_type = 'concept' "
+                "AND e.dst_id = %s AND e.src_type = 'concept' "
+                "AND COALESCE(e.props->>'confirmed', 'false') = 'false' "
+                "ORDER BY c.name",
+                (concept_id,),
+            )
+            return [ConceptRef(id=r[0], name=r[1]) for r in cur.fetchall()]
+
+    def confirmed_broader_parents_by_narrower(self) -> dict[int, list[ConceptRef]]:
+        """Map each narrower Concept id → its confirmed `broader-of` parents, in one
+        query for the /concepts hierarchy column (issue #87) so the list read stays
+        O(1) in round-trips. Proposals are excluded — they stay invisible to roll-up
+        (ADR-0013). Parents come name-ordered per narrower Concept."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT e.dst_id, c.id, c.name FROM edges e "
+                "JOIN concepts c ON c.id = e.src_id "
+                "WHERE e.kind = 'broader-of' AND e.src_type = 'concept' "
+                "AND e.dst_type = 'concept' "
+                "AND COALESCE(e.props->>'confirmed', 'false') = 'true' "
+                "ORDER BY e.dst_id, c.name"
+            )
+            by_narrower: dict[int, list[ConceptRef]] = {}
+            for narrower_id, parent_id, parent_name in cur.fetchall():
+                by_narrower.setdefault(narrower_id, []).append(
+                    ConceptRef(id=parent_id, name=parent_name)
+                )
+            return by_narrower
+
+    def attach_broader_of(self, broader_id: int, narrower_id: int) -> None:
+        """Attach a broader parent as *confirmed* — the owner's manual curation lands
+        visible to roll-up immediately, skipping the review queue (issue #87).
+
+        Hierarchy is the one Concept→Concept link the owner curates (ADR-0013), so a
+        hand attach bypasses the two-tier confidence gate (ADR-0014) that vets the
+        *system's* guesses. Upserts: a brand-new edge inserts confirmed, an existing
+        proposal flips to confirmed. The cycle-guard trigger fires on both insert and
+        update, so an attach that would close a loop raises and rolls back.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO edges (src_type, src_id, dst_type, dst_id, kind, props) "
+                "VALUES ('concept', %s, 'concept', %s, 'broader-of', "
+                "        '{\"confirmed\": true}') "
+                "ON CONFLICT (src_type, src_id, dst_type, dst_id, kind) "
+                "DO UPDATE SET props = jsonb_set(edges.props, '{confirmed}', 'true')",
+                (broader_id, narrower_id),
+            )
+
     def list_broader_of(self, *, confirmed: bool | None = None) -> list[tuple]:
         """Every `broader-of` edge as (broader_id, narrower_id, confirmed) — for the
         curation view and tests. `confirmed` filters to confirmed/proposed when set."""
@@ -2748,13 +2808,16 @@ class Repository:
         """Every Concept hub node, alphabetical; optionally filtered by kind.
 
         Each carries a `reference_count` of the Claims + Protocols that reference
-        it, so the browser can show how load-bearing a Concept is at a glance.
+        it, so the browser can show how load-bearing a Concept is at a glance, plus
+        its confirmed `broader-of` parents (issue #87) for the hierarchy column —
+        proposals stay hidden, consistent with roll-up semantics (ADR-0013/0014).
         """
         where = ""
         params: dict = {}
         if kind is not None:
             where = " WHERE c.kind = %(kind)s"
             params["kind"] = kind
+        parents_by_narrower = self.confirmed_broader_parents_by_narrower()
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT c.id, c.name, c.kind, "
@@ -2764,7 +2827,13 @@ class Repository:
                 params,
             )
             return [
-                BokConcept(id=r[0], name=r[1], kind=r[2], reference_count=r[3])
+                BokConcept(
+                    id=r[0],
+                    name=r[1],
+                    kind=r[2],
+                    reference_count=r[3],
+                    broader_parents=parents_by_narrower.get(r[0], []),
+                )
                 for r in cur.fetchall()
             ]
 
@@ -2774,6 +2843,8 @@ class Repository:
         Fills `claims` and `protocols` by walking the inbound `references` edges,
         so the owner can pivot from a Concept to all the evidence touching it — the
         relatedness-by-shared-Concept traversal, without a visual graph (ADR-0009).
+        Also fills `broader_parents` (confirmed) and `proposed_parents` (pending) so
+        the detail page can render and curate the `broader-of` hierarchy (issue #87).
         """
         with self._conn.cursor() as cur:
             cur.execute(
@@ -2805,6 +2876,8 @@ class Repository:
             reference_count=len(claims) + len(protocols),
             claims=claims,
             protocols=protocols,
+            broader_parents=self.broader_parents(concept_id, confirmed_only=True),
+            proposed_parents=self.proposed_broader_parents(concept_id),
         )
 
     # -- in-place edit & delete (writes) -------------------------------------

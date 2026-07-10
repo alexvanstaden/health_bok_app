@@ -226,6 +226,25 @@ def propose_broader_of(broader_id: int, narrower_id: int, *, repo: Repository) -
     return True
 
 
+def attach_broader_of(broader_id: int, narrower_id: int, *, repo: Repository) -> bool:
+    """Manually attach a broader parent, landing CONFIRMED immediately (issue #87).
+
+    Hierarchy is the one Concept→Concept link the owner curates (ADR-0013), so a hand
+    attach skips the two-tier review queue (ADR-0014) — that gate vets the *system's*
+    guesses, not the owner's — and is visible to roll-up at once. Returns ``False`` if
+    either Concept is gone. The DB cycle-guard rejects an attach that would close a
+    loop (it raises; the caller's transaction rolls back). Idempotent: re-attaching an
+    existing pair (proposed or confirmed) leaves it confirmed.
+    """
+    if repo.get_concept(broader_id) is None or repo.get_concept(narrower_id) is None:
+        repo.rollback()
+        return False
+    repo.attach_broader_of(broader_id, narrower_id)
+    repo.commit()
+    logger.info("attached %s broader-of %s (confirmed)", broader_id, narrower_id)
+    return True
+
+
 def confirm_broader_of(broader_id: int, narrower_id: int, *, repo: Repository) -> bool:
     """Confirm a proposed `broader-of` edge, making it visible to roll-up (ADR-0013).
 

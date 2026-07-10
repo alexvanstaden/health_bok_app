@@ -298,3 +298,97 @@ def test_suggester_degrades_to_empty_on_llm_failure(conn):
     assert curation.suggest_broader_of(
         bmet, proposer=boom, embedder=FakeEmbedder(VECTORS), repo=repo, model=EMBED_MODEL
     ) == []
+
+
+# -- Manual attach: the owner curates one link, landing confirmed (issue #87) ---
+#
+# Hierarchy is the one Concept→Concept link the owner curates (ADR-0013), so a hand
+# attach lands *confirmed* immediately — visible to roll-up with no trip through the
+# two-tier review queue (ADR-0014), which vets the system's guesses, not the owner's.
+
+
+def test_manual_attach_lands_confirmed_and_rolls_up_immediately(conn):
+    repo = Repository(conn)
+    _seed_descendant_relation(repo)
+    brain = _mint(repo, "Brain")
+    repo.commit()
+    bmet = _cid(repo, "Brain metabolism")
+
+    # No propose step: the hand attach is confirmed at once, nothing left pending.
+    assert curation.attach_broader_of(brain, bmet, repo=repo) is True
+    assert repo.list_broader_of(confirmed=True) == [(brain, bmet, True)]
+    assert repo.list_broader_of(confirmed=False) == []
+
+    # Visible to roll-up right away — the descendant and its relationship surface at
+    # the broader Concept with no further clicks.
+    hood = repo.concept_neighbourhood(brain, now=NOW)
+    assert [c.name for c in hood.sub_concepts] == ["Brain metabolism"]
+    [rel] = hood.relations
+    assert (rel.src_name, rel.predicate, rel.dst_name) == (
+        "Brain metabolism", "associated_with", "ketones",
+    )
+
+
+def test_manual_attach_confirms_an_existing_proposal(conn):
+    # A hand attach over a still-pending system proposal flips it to confirmed
+    # (upsert), rather than duplicating the edge — the review-queue row disappears.
+    repo = Repository(conn)
+    brain = _mint(repo, "Brain")
+    bmet = _mint(repo, "Brain metabolism")
+    repo.commit()
+
+    curation.propose_broader_of(brain, bmet, repo=repo)
+    assert repo.list_broader_of(confirmed=False) == [(brain, bmet, False)]
+
+    assert curation.attach_broader_of(brain, bmet, repo=repo) is True
+    assert repo.list_broader_of(confirmed=True) == [(brain, bmet, True)]
+    assert repo.list_broader_of(confirmed=False) == []
+
+
+def test_manual_attach_rejects_a_cycle(conn):
+    # The cycle guard still applies to a manual attach: an edge that would close a
+    # loop raises (the endpoint maps this to a visible 409), leaving no half-state.
+    repo = Repository(conn)
+    a = _mint(repo, "Brain")
+    b = _mint(repo, "Brain metabolism")
+    repo.commit()
+
+    assert curation.attach_broader_of(a, b, repo=repo) is True
+    with pytest.raises(psycopg.errors.RaiseException):
+        repo.attach_broader_of(b, a)
+    conn.rollback()
+
+    # A self-loop is rejected too.
+    with pytest.raises(psycopg.errors.RaiseException):
+        repo.attach_broader_of(a, a)
+    conn.rollback()
+
+
+def test_manual_attach_onto_a_missing_concept_is_false(conn):
+    repo = Repository(conn)
+    brain = _mint(repo, "Brain")
+    repo.commit()
+    assert curation.attach_broader_of(brain, 999999, repo=repo) is False
+
+
+def test_list_and_detail_carry_broader_parents(conn):
+    # /concepts list carries each Concept's *confirmed* parents for the hierarchy
+    # column (proposals excluded); the detail read carries confirmed *and* pending
+    # proposals, kept apart, so the owner can confirm/remove either (issue #87).
+    repo = Repository(conn)
+    brain = _mint(repo, "Brain")
+    genetics = _mint(repo, "genetics")
+    bmet = _mint(repo, "Brain metabolism")
+    repo.commit()
+
+    curation.attach_broader_of(brain, bmet, repo=repo)     # confirmed
+    curation.propose_broader_of(genetics, bmet, repo=repo)  # still a proposal
+
+    listed = {c.id: c for c in repo.list_concepts()}
+    assert [p.name for p in listed[bmet].broader_parents] == ["Brain"]
+    assert listed[bmet].proposed_parents == []  # list read never surfaces proposals
+    assert listed[brain].broader_parents == []  # a root Concept has no parents
+
+    detail = repo.get_concept(bmet)
+    assert [p.name for p in detail.broader_parents] == ["Brain"]
+    assert [p.name for p in detail.proposed_parents] == ["genetics"]
