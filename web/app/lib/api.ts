@@ -280,6 +280,8 @@ export type BokConcept = {
   reference_count: number;
   claims: ClaimRef[]; // what references it (detail only)
   protocols: ProtocolRef[];
+  broader_parents: ConceptRef[]; // confirmed broader-of parents (list + detail)
+  proposed_parents: ConceptRef[]; // pending broader-of proposals (detail only)
 };
 
 export type ClaimEdit = { text: string; type: string; locator_seconds: number };
@@ -443,6 +445,25 @@ export function rejectBroaderOf(narrowerId: number, broaderId: number) {
   return json(`/api/concepts/${narrowerId}/broader-of/${broaderId}`, {
     method: "DELETE",
   });
+}
+
+// Manually attach a broader parent (issue #87). Unlike a proposal, this lands
+// *confirmed* — the one link the owner curates (ADR-0013), so it skips the review
+// queue and is visible to roll-up at once. A cycle-closing attach fails with a 409.
+export function attachBroaderOf(narrowerId: number, broaderId: number) {
+  return json(`/api/concepts/${narrowerId}/broader-of`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ broader_id: broaderId }),
+  });
+}
+
+// Broader Concepts this one could roll up under, LLM-ranked (ADR-0013) — used to
+// *seed* the detail-page attach picker with likely parents for one-click attach.
+export function getBroaderOfSuggestions(
+  conceptId: number,
+): Promise<{ suggestions: ConceptRef[] }> {
+  return json(`/api/concepts/${conceptId}/broader-of/suggestions`);
 }
 
 // -- The personal layer (issue #16) -----------------------------------------

@@ -75,7 +75,14 @@ boundary. In it you:
   debunking, on the same pair is flagged contested rather than merged). A **broader-of
   taxonomy** is the one link you curate: the system *proposes* broader parents (an LLM over the
   embedding cluster) and you confirm — a proposal stays invisible to roll-up until you do, and a
-  cycle guard keeps it a DAG. Selecting a Concept opens its **neighbourhood view**
+  cycle guard keeps it a DAG. The hierarchy is visible and hand-curatable right on the Concept
+  surfaces (issue #87): the `/concepts` list shows each Concept's **confirmed** broader parents
+  in a column (each a link, proposals hidden) with an inline **+ parent** attach, and a
+  Concept's page shows its confirmed parents *and* any pending proposals with a search-to-attach
+  picker (seeded by the suggester) and a remove control. A **hand attach lands confirmed
+  immediately** — visible to roll-up with no trip through the `/hierarchy` review queue (that
+  two-tier gate vets the *system's* guesses, not yours); an attach that would close a cycle is
+  rejected with a visible error. Selecting a Concept opens its **neighbourhood view**
   (`/concepts/{id}/neighbourhood`, linked from the Concept page): its sub-Concepts
   plus every relationship in its whole subtree, attributed to where it lives, deduped, and
   **ranked by Strength** (distinct creators × your per-Creator trust-tier × recency-decay, so

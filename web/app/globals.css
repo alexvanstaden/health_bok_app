@@ -278,10 +278,53 @@ button.link-pill.new-concept:hover { filter: brightness(1.15); }
   margin: 0.5rem 0;
 }
 .select-row.selected { border-color: var(--accent); }
-.select-row input[type="checkbox"] { flex: none; width: 1rem; height: 1rem; }
+.select-row input[type="checkbox"] {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.25rem; /* align with the first line of the (now multi-line) row */
+}
+.select-row { align-items: flex-start; }
 .select-row .grow { flex: 1; min-width: 0; }
 .select-row a { text-decoration: none; color: var(--text); }
 .select-row a:hover { color: var(--accent); }
+
+/* -- broader-of hierarchy on the Concept surfaces (issue #87) ------------- */
+
+/* The hierarchy column on a /concepts row: the confirmed broader parents this
+   Concept rolls up under, each a chip-link, with an inline "+ parent" attach. */
+.parents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  margin-top: 0.35rem;
+  font-size: 0.85rem;
+}
+.parent-chip {
+  text-decoration: none;
+  color: var(--text) !important;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+}
+.parent-chip:hover { border-color: var(--accent); }
+
+/* The attach-a-parent picker (shared by list + detail). */
+.attach-parent { margin-top: 0.4rem; }
+.attach-parent .row { display: flex; gap: 0.5rem; align-items: center; }
+.attach-parent input { min-width: 16rem; max-width: 100%; }
+.attach-parent .seeds { margin-top: 0.4rem; font-size: 0.85rem; }
+
+/* A pending broader-of proposal on the detail page: set apart from a confirmed
+   parent (a plain pill) as a dashed amber pill — it isn't visible to roll-up yet. */
+.link-pill.proposed { border-style: dashed; border-color: var(--amber); }
+button.mini {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0 0.4rem;
+  cursor: pointer;
+}
 
 /* The merge action bar, pinned above the list once 2+ Concepts are selected. */
 .merge-bar {
